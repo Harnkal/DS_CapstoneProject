@@ -4,7 +4,7 @@ author: "Silva, Rafael"
 date: "June 11, 2019"
 output:
   html_document:
-    keep_md: no
+    keep_md: yes
   pdf_document: default
 urlcolor: blue
 ---
@@ -15,7 +15,16 @@ knitr::opts_chunk$set(echo = TRUE)
 
 This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
 
-Each task will be treated as a sepparated report. It means that in each task the data will be loaded and prepared again, this allows me to run each task sepparetely. Also, this is going to make the report slowier to run in its entirety.
+## Setup
+
+Here are the packages used for this report
+
+```{r, message=FALSE}
+library(dplyr)
+library(quanteda)
+#quanteda_options("threads"=2)
+library(doParallel)
+```
 
 ## Task 0: Undertanding the problem
 
@@ -24,45 +33,7 @@ You may acess the description for this task [here](https://www.coursera.org/lear
 As the general idea of this task is to download and read the data in the work environment (WE), I created 2 functions to do exactly that.
 
 ```{r}
-# t0_functions
-
-## This script has all the functions created to accomplish the task 0, they will
-## be used in the other scripts and reports
-
-
-# get.data
-## used to download and extract the datasets into the data directory.
-get.data <- function() {
-    ## Downloading and allocating
-    if(!dir.exists("data")) dir.create("data")
-    if(!file.exists("data/Coursera-SwiftKey.zip")) {
-        download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip",
-                      "data/Coursera-SwiftKey.zip")
-    }
-    if(!dir.exists("data/final")) unzip("data/Coursera-SwiftKey.zip", exdir = "data")
-}
-
-# read.data
-## Used to read the project data into R. It takes the following arguments:
-##   - lang: the language in which you want to read that can be "en_US", "de_DE", 
-##           "fi_FI" and "ru_RU" for English, German, Finnish and Russian 
-##           respectively.
-##   - source: from which source you want to read you can choose one or more from
-##             "blogs", "news"and "twitter".
-##   - n: The number of lines to read from each file. n = -1L means that all the 
-##        lines should be read.
-## This function returns a list that contains a list element for each of the read
-## files.
-read.data <- function(lang="en_US", Source=c("blogs", "news", "twitter"), n=-1L) {
-    directory <- paste("./data/final/", lang, "/", sep="")
-    out = list()
-    for (i in 1:length(Source)) {
-        con <- file(paste(directory, lang, ".", Source[i], ".txt", sep=""))
-        out[[Source[i]]] <- readLines(con, n=n, warn=FALSE)
-        close(con)
-    }
-    return(out)
-} 
+source("functions/t0_functions.R")
 ```
 
 The function *get.data()* accomplish the task of downloading and extracting the data into the working directory (if not already downloaded).
@@ -74,7 +45,7 @@ get.data()
 The *read.data()* function reads the *n* first lines of the files for the language and source selected. As the computer I'm working on is dealing very well with the size of the files for one language only, I will read the files entirely.
 
 ```{r}
-raw_data <- read.data(lang = "en_US", source = c("blogs", "news", "twitter"), n=-1L)
+raw_data <- read.data(lang = "en_US", s = c("blogs", "news", "twitter"), n=-1L)
 ```
 
 Let's take a look at how the data looks like
@@ -93,17 +64,11 @@ cat(paste("\n\nfirst line of twitter:\n", raw_data$twitter[1]))
 
 Right now we have an idea how of how the data looks like, in the next steps we might jump into the data cleaning and preparation.
 
+All the functions created in this taks are in **"functions/t0_functions.R"**.
+
 ## Task 1: Getting and cleaning the data
 
 You may acess the description for this task [here](https://www.coursera.org/learn/data-science-project/supplement/IbTUL/task-1-getting-and-cleaning-the-data).
-
-Before starting this task we need to read the data into the WE.
-
-```{r}
-source("functions/t0_functions.R")
-get.data()
-raw_data <- read.data()
-```
 
 In this task we have to accomplish two tasks, tokenize our data and filter profanity from it.
 
@@ -111,9 +76,58 @@ In this task we have to accomplish two tasks, tokenize our data and filter profa
 
 The description of the task is: Identifying appropriate tokens such as words, punctuation, and numbers. Writing a function that takes a file as input and returns a tokenized version of it.
 
+The first thing we should do is to unify our data in a data frame to make it easier to work with, but without losing any information. Here is a function to do that.
 
+```{r}
+source("functions/t1_functions.R")
+```
 
+Let's apply it to our data and remove the raw_data to save some memory
 
+```{r}
+df_data <- to_df(raw_data, lang = "en_US")
+rm(raw_data)
+```
+
+The quanteda package should help us with the tokenization. Let's first tokenize the texts as they are so we can have an idea of what they look like. This is a very long process so I decided to parallelize it. It take quite a toll on my computer and the logistics are still havy, but I've been able to reduce the time in 50%.
+
+```{r}
+init <- Sys.time()
+raw_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, ncl=7, what = "word")
+Sys.time()-init
+```
+
+So here is a sample of what the tokenized data look like vs. the raw text data. We are not using it so i'm deleting it.
+
+```{r}
+cat(paste("Raw text data Sample:\n", df_data$Text[1],"\n\n"))
+print(raw_tokens[1])
+rm(raw_tokens)
+```
+
+This is a lot of data, but not everything in it is useful. As the objective here is to create a recomendation system for words, There are some things that we might not want to predict like numbers, punctuations, symbols, hyphens and urls. So we are going to remove those from our tokens. We are also sending everything to lowercase because I don't think I have the knowledge or the data to make this case sensistive.
+
+```{r}
+init <- Sys.time()
+f_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, ncl=7, tolower=TRUE, 
+                    what = "word", remove_numbers = TRUE, remove_punct = TRUE,
+                    remove_symbols = TRUE, remove_twitter = FALSE, remove_hyphens = TRUE,
+                    remove_url = TRUE)
+Sys.time()-init
+```
+
+Let's take a look at how the look like now
+
+```{r}
+cat(paste("Raw text data Sample:\n", df_data$Text[1],"\n\n"))
+print(f_tokens[1])
+```
+
+Well, it is much cleaner, but we just want actual words in our vocabulary. There are still things like `r f_tokens[[1]][16] and f_tokens[[1]][17]`. We must find a way of addressing that.
+
+```{r}
+
+```
 
 
 
