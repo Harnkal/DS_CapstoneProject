@@ -47,7 +47,27 @@ ptokens <- function(docs, dnames, ncl, tolower = FALSE, ...){
     return(out)
 }
 
-
+# filterProfanity
+## This function downloads (if not already downloaded) a list of profanity words
+## and loads it into memory and remove this words from the a tokens object.
+filterProfanity <- function(tokens){
+    ## Define profanity file path
+    file_path <- "data/final/en_US/profanity.txt"
+    ## Download if not already downloaded
+    if(!file.exists(file_path)){
+        url <- "https://raw.githubusercontent.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en"
+        download.file(url, destfile = file_path, method = "curl")
+    }
+    ## Reads profanity file into memory
+    profanity_list <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)
+    profanity_list <- profanity_list$V1
+    ## Removes profanity from tokens
+    output <- tokens_remove(tokens, profanity_list)
+    ## Pront the number of removed words to the console
+    print(paste(length(types(tokens))-length(types(output)), "bad words were removed from the tokens"))
+    ## return clean tokens
+    return(output)
+}
 
 
 

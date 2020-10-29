@@ -104,7 +104,7 @@ print(as.list(raw_tokens[1]))
 rm(raw_tokens)
 ```
 
-This is a lot of data, but not everything in it is useful. As the objective here is to create a recommendation system for words, There are some things that we might not want to predict like numbers, punctuation, symbols, hyphens and urls. So we are going to remove those from our tokens. We are also sending everything to lowercase because I don't think I have the knowledge or the data to make this case sensitive.
+This is a lot of data, but not everything in it is useful. As the objective here is to create a recommendation system for words, there are some things that we might not want to predict like numbers, punctuation, symbols, hyphens and urls. So we are going to remove those from our tokens. We are also sending everything to lowercase because I don't think I have the knowledge or the data to make this case sensitive.
 
 ```{r}
 init <- Sys.time()
@@ -115,7 +115,7 @@ f_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, ncl=4, tolower=TRUE,
 Sys.time()-init
 ```
 
-Let's take a look at how the look like now
+Let's take a look at how the data look like now
 
 ```{r}
 cat(paste("Raw text data Sample:\n", df_data$Text[1],"\n\n"))
@@ -128,15 +128,23 @@ This looks as close to perfection as we will get. Now, on to the profanity filte
 
 We want to make a product that can be used by people of all ages, so we need to remove profanity from the set of words that can be predicted. And that is what we are going to do now.
 
-Fist let's have a look at the our dictionary
+Fist let's have a look at the number of words we have on the documents 
 
 ```{r}
-f_tokens
+length(types(f_tokens))
 ```
 
+I created a function that will download a list of profanities I found on github and remove them from our tokens.
 
+```{r}
+f_tokens <- filterProfanity(f_tokens)
+```
 
+Let's have a look at the number of words we have now.
 
+```{r}
+length(types(f_tokens))
+```
 
-
+Looks very good, hopefully this removed most of the bad words from our data.
 
