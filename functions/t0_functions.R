@@ -37,7 +37,7 @@ read.data <- function(lang = "en_US", s = c("blogs", "news", "twitter"), n = -1L
         ## Opening connection
         con <- file(paste(directory, lang, ".", s[i], ".txt", sep=""))
         ## Reading from connection and storing in the output list
-        out[[s[i]]] <- readLines(con, n = n, warn = FALSE)
+        out[[s[i]]] <- readLines(con, n = n, warn = FALSE, encoding="UTF-8")
         ## Closing connection
         close(con)
     }

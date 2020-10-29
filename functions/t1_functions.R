@@ -13,10 +13,10 @@ to_df <- function(lists, lang){
                       Text = character(),
                       stringsAsFactors = FALSE)
     ## Transforming the data
-    for(i in names(lists)){
-        newdf <- data.frame(ID = paste(i, lang, 1:length(lists[[i]]), sep = "."),
+    for(name in names(lists)){
+        newdf <- data.frame(ID = paste(name, lang, 1:length(lists[[name]]), sep = "."),
                             stringsAsFactors = FALSE)
-        newdf["Text"] <- as.character(lists[[i]])
+        newdf["Text"] <- as.character(lists[[name]])
         ## Merging data from different sources
         out <- bind_rows(out, newdf)
     }
@@ -44,7 +44,7 @@ ptokens <- function(docs, dnames, ncl, tolower = FALSE, ...){
     ## Closing connection
     stopCluster(cl)
     ##Returning output
-    out
+    return(out)
 }
 
 
