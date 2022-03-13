@@ -17,12 +17,13 @@ This is a report for own use, so I can keep track of the advances made in the pr
 
 ## Setup
 
-Here are the packages used for this report
+Here are the packages used for this report. Some of the libraries are used in the functions defined in outside files, but they will be always imported here to avoid redundancy. 
 
 ```{r, message=FALSE}
 library(dplyr)
 library(quanteda)
 library(doParallel)
+library()
 ```
 
 ## Task 0: Undertanding the problem
@@ -50,9 +51,9 @@ raw_data <- read.data(lang = "en_US", s = c("blogs", "news", "twitter"), n=-1L)
 Let's take a look at how the data looks like
 
 ```{r}
-print(paste("blogs has", length(raw_data$blogs), "observations"))
-print(paste("news has", length(raw_data$news), "observations"))
-print(paste("twitter has", length(raw_data$twitter), "observations"))
+cat(paste("blogs has", length(raw_data$blogs), "observations"))
+cat(paste("\nnews has", length(raw_data$news), "observations"))
+cat(paste("\ntwitter has", length(raw_data$twitter), "observations"))
 ```
 
 ```{r}
@@ -63,37 +64,34 @@ cat(paste("\n\nfirst line of twitter:\n", raw_data$twitter[1]))
 
 Right now we have an idea how of how the data looks like, in the next steps we might jump into the data cleaning and preparation.
 
-All the functions created in this taks are in **"functions/t0_functions.R"**.
+All the functions created in this task are in **"functions/t0_functions.R"**.
 
 ## Task 1: Getting and cleaning the data
 
 You may acess the description for this task [here](https://www.coursera.org/learn/data-science-project/supplement/IbTUL/task-1-getting-and-cleaning-the-data).
 
-In this task we have to accomplish two tasks, tokenize our data and filter profanity from it.
-
-### Tokenization
-
-The description of the task is: Identifying appropriate tokens such as words, punctuation, and numbers. Writing a function that takes a file as input and returns a tokenized version of it.
-
-The first thing we should do is to unify our data in a data frame to make it easier to work with, but without losing any information. Here is a function to do that.
+In this task we have to accomplish two tasks, tokenize our data and filter profanity from it. The file that was sourced bellow contains the functions *to_df*, *ptokens*and *filterProfanity* that we are going to use in for this task.
 
 ```{r}
 source("functions/t1_functions.R")
 ```
 
-Let's apply it to our data and remove the raw_data to save some memory
+### Tokenization
+
+The description of the task is: Identifying appropriate tokens such as words, punctuation, and numbers. Writing a function that takes a file as input and returns a tokenized version of it.
+
+The first thing we should do is to unify our data in a data frame to make it easier to work with. Let's apply the function  *to_df* to our data and remove the raw_data to save some memory. As we are here, let's also have a look at how much memory it is using.
 
 ```{r}
 df_data <- to_df(raw_data, lang = "en_US")
 rm(raw_data)
+cat(sprintf("df_data is occupying %.2fMBs in memory", object.size(df_data)/1024/1024))
 ```
 
 The quanteda package should help us with the tokenization. Let's first tokenize the texts as they are so we can have an idea of what they look like. This is a very long process so I decided to parallelize it. It take quite a toll on my computer and the logistics are still heavy, but I've been able to reduce the time in 50%.
 
 ```{r}
-init <- Sys.time()
-raw_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, ncl=4, what = "word")
-Sys.time()-init
+system.time(raw_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, what = "word"))
 ```
 
 So here is a sample of what the tokenized data look like vs. the raw text data. We are not using it so I'm deleting it.
@@ -107,12 +105,11 @@ rm(raw_tokens)
 This is a lot of data, but not everything in it is useful. As the objective here is to create a recommendation system for words, there are some things that we might not want to predict like numbers, punctuation, symbols, hyphens and urls. So we are going to remove those from our tokens. We are also sending everything to lowercase because I don't think I have the knowledge or the data to make this case sensitive.
 
 ```{r}
-init <- Sys.time()
-f_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, ncl=4, tolower=TRUE, 
-                    what = "word", remove_punct = TRUE, remove_symbols = TRUE, 
-                    remove_numbers = TRUE, remove_url = TRUE, remove_separators=TRUE,
-                    split_hyphens = TRUE)
-Sys.time()-init
+system.time(f_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, tolower=TRUE, 
+                                what = "word", remove_punct = TRUE, 
+                                remove_symbols = TRUE, remove_numbers = TRUE, 
+                                remove_url = TRUE, remove_separators=TRUE,
+                                split_hyphens = TRUE))
 ```
 
 Let's take a look at how the data look like now
@@ -128,16 +125,30 @@ This looks as close to perfection as we will get. Now, on to the profanity filte
 
 We want to make a product that can be used by people of all ages, so we need to remove profanity from the set of words that can be predicted. And that is what we are going to do now.
 
-Fist let's have a look at the number of words we have on the documents 
+First let's have a look at the number of words we have on the documents 
 
 ```{r}
 length(types(f_tokens))
+```
+Now let's download a list of profanities that I found on github and read it to the workspace.
+
+```{r}
+## Define profanity file path
+file_path <- "data/final/en_US/profanity.txt"
+## Download if not already downloaded
+if(!file.exists(file_path)){
+    url <- "https://raw.githubusercontent.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en"
+    download.file(url, destfile = file_path, method = "curl")
+}
+## Reads profanity file into memory
+profanity_list <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)
+profanity_list <- profanity_list$V1
 ```
 
 I created a function that will download a list of profanities I found on github and remove them from our tokens.
 
 ```{r}
-f_tokens <- filterProfanity(f_tokens)
+f_tokens <- filterProfanity(f_tokens, profanity_list)
 ```
 
 Let's have a look at the number of words we have now.
@@ -147,4 +158,63 @@ length(types(f_tokens))
 ```
 
 Looks very good, hopefully this removed most of the bad words from our data.
+
+### Profanity filter revisited 2022
+
+Now in 2022, with a little more experience, I noticed that some profanity are not made out of a single word, so filtering it after the tokenization is dangerous, we don't want kids to write "ball" and receive the recommendation "sack" even though none of these words are a problem on their own. More than that, we do have a lot of documents, which means, it is not going to be a problem to remove the ones that contain offensive words or expressions instead of removing an arbitrary word or exprtession from it. This way we guaranty that the documents are staying are going to make sense. So I included a new function in the **"functions/t1_functions.R"** file, called *filterProfDocs*, as in filter profane documents. This should take a long time but I've been able to parallelize it quite well.
+
+```{r, cache=TRUE, cache.lazy=FALSE}
+system.time(pfilter <- filterProfDocs(df_data$Text, profanity_list))
+```
+
+Let's have a look at how many documents are leaving our corpus
+
+```{r}
+cat(sprintf("%i documents are being removed from our copus\n%i documents remaining \nthe removed amount corresponds to %.2f%% of the documents",
+            sum(!pfilter), sum(pfilter), mean(!pfilter)*100))
+```
+Great!! Let's update our data and tokenize it again.
+
+```{r}
+df_data <- filter(df_data, pfilter)
+system.time(f_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, tolower=TRUE, 
+                                what = "word", remove_punct = TRUE, 
+                                remove_symbols = TRUE, remove_numbers = TRUE, 
+                                remove_url = TRUE, remove_separators=TRUE,
+                                split_hyphens = TRUE))
+```
+With that done, I think the data cleaning is finally done. Just to make sure, let's have a look at the *filterProfanity*, if it worked it should remove zero worlds from the tokens.
+
+```{r}
+temp <- filterProfanity(f_tokens, profanity_list)
+rm(temp)
+```
+Perfect, with that, let's head on to the next task.
+
+## Task 2: Exploratory data analysis
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

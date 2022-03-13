@@ -24,49 +24,67 @@ to_df <- function(lists, lang){
 }
 
 # ptonkens
-## function for paralellized tokenization
-ptokens <- function(docs, dnames, ncl, tolower = FALSE, ...){
-    ## Oppening parallel backend
-    cl <- makeCluster(ncl)
-    registerDoParallel(cl)
-    registerDoSEQ()
+## function for paralellized tokenization.
+## (since the last time I did anything in this document a lot of things changed 
+## changed, it seems like quanteda runs much faster if I don't paralellize it 
+## manualy, maybe it is paralellizing it by itself, anyways, this function is 
+## only a wrapper now) (it seems like it is using my GPU, which explains why it 
+## is so much faster)
+## added functionality to filter profanity before tokenization for offensive 
+## phrasal verbs and offensive expressions with more than a word
+ptokens <- function(docs, dnames, tolower = FALSE, ...){
     ## tolower
     if(tolower) docs <- tolower(docs)
-    ## Separating chunks
-    suppressWarnings(lists <- split(docs, 1:ncl))
-    suppressWarnings(names <- split(dnames, 1:ncl))
     ## Tokenizing
-    out <- foreach(i = 1:ncl, .combine = "+", .packages = "quanteda") %dopar% {
-        toks <- tokens(lists[[i]], ...)
-        names(toks) <- names[[i]]
-        toks
-    }
-    ## Closing connection
-    stopCluster(cl)
+    toks <- tokens(docs, ...)
+    names(toks) <- dnames
     ##Returning output
-    return(out)
+    return(toks)
 }
 
 # filterProfanity
-## This function downloads (if not already downloaded) a list of profanity words
-## and loads it into memory and remove this words from the a tokens object.
-filterProfanity <- function(tokens){
-    ## Define profanity file path
-    file_path <- "data/final/en_US/profanity.txt"
-    ## Download if not already downloaded
-    if(!file.exists(file_path)){
-        url <- "https://raw.githubusercontent.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en"
-        download.file(url, destfile = file_path, method = "curl")
-    }
-    ## Reads profanity file into memory
-    profanity_list <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)
-    profanity_list <- profanity_list$V1
+## This function removes words from a list from the a tokens object.
+## (2022 no idea why this function exists, could have been a single call of 
+## tokens_remove, go figure the mind of the younger me)
+filterProfanity <- function(tokens, profanity_list){
     ## Removes profanity from tokens
     output <- tokens_remove(tokens, profanity_list)
     ## Pront the number of removed words to the console
     print(paste(length(types(tokens))-length(types(output)), "bad words were removed from the tokens"))
     ## return clean tokens
     return(output)
+}
+
+# filterProfDocs
+## This function removes documents that contain words or expressions from a list
+## of profane words.
+## This function takes two arguments:
+##   - docs: a list or vector of documents
+##   - plist: a list of words and expressions to be filtered out of the documents list
+## This function returns a logical vector with the documents to keep
+filterProfDocs <- function(docs, plist) {
+    # pbar = progress_bar$new(total = length(plist))
+    # filter <- logical(length = length(docs))
+    # for(prof in plist) {
+    #     pbar$tick()
+    #     pattern <-  paste("\\b", prof, "\\b", sep = "")
+    #     filter[!filter] <- grepl(pattern, docs[!filter], ignore.case = TRUE)
+    # }
+    # return(filter)
+    nc <- detectCores()-1
+    cl = makePSOCKcluster(nc)
+    registerDoParallel(cl)
+    
+    suppressWarnings(pchunks <- split(plist, 1:nc))
+    
+    filterLists <- foreach(pchunk = pchunks, .combine = "c") %dopar% {
+        pattern = paste("\\b",pchunk,"\\b", sep = "",collapse = "|")
+        list(grepl(pattern, docs, ignore.case = TRUE))
+    }
+    stopCluster(cl)
+    filterLists <- matrix(unlist(filterLists), ncol = nc)
+    filter = rowSums(filterLists) == 0
+    return(filter)
 }
 
 
