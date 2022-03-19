@@ -1,80 +1,32 @@
 ---
-title: "Progress Report"
-author: "Silva, Rafael"
-date: "June 11, 2019"
-output:
-  html_document:
-    keep_md: yes
-  pdf_document: default
-urlcolor: blue
+title: "Task 1: Getting and cleaning the data"
+output: html_notebook
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
+## Introduction and setup
 
 This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
 
-## Setup
+let's also load the workspace from last step.
 
-Here are the packages used for this report. Some of the libraries are used in the functions defined in outside files, but they will be always imported here to avoid redundancy. 
+```{r}
+load("checkpoints/t0.RData")
+```
 
-```{r, message=FALSE}
+importing all the libraries we are going to use in this task.
+
+```{r message=FALSE, warning=FALSE}
+library(doParallel)
 library(dplyr)
 library(quanteda)
-library(doParallel)
-library()
 ```
 
-## Task 0: Undertanding the problem
 
-You may acess the description for this task [here](https://www.coursera.org/learn/data-science-project/supplement/Iimbd/task-0-understanding-the-problem).
-
-As the general idea of this task is to download and read the data in the work environment (WE), I created 2 functions to do exactly that.
-
-```{r}
-source("functions/t0_functions.R")
-```
-
-The function *get.data()* accomplish the task of downloading and extracting the data into the working directory (if not already downloaded).
-
-```{r}
-get.data()
-```
-
-The *read.data()* function reads the *n* first lines of the files for the language and source selected. As the computer I'm working on is dealing very well with the size of the files for one language only, I will read the files entirely.
-
-```{r}
-raw_data <- read.data(lang = "en_US", s = c("blogs", "news", "twitter"), n=-1L)
-```
-
-Let's take a look at how the data looks like
-
-```{r}
-cat(paste("blogs has", length(raw_data$blogs), "observations"))
-cat(paste("\nnews has", length(raw_data$news), "observations"))
-cat(paste("\ntwitter has", length(raw_data$twitter), "observations"))
-```
-
-```{r}
-cat(paste("first line of blogs:\n", raw_data$blogs[1]))
-cat(paste("\n\nfirst line of news:\n", raw_data$news[1]))
-cat(paste("\n\nfirst line of twitter:\n", raw_data$twitter[1]))
-```
-
-Right now we have an idea how of how the data looks like, in the next steps we might jump into the data cleaning and preparation.
-
-All the functions created in this task are in **"functions/t0_functions.R"**.
-
-## Task 1: Getting and cleaning the data
+## Execution
 
 You may acess the description for this task [here](https://www.coursera.org/learn/data-science-project/supplement/IbTUL/task-1-getting-and-cleaning-the-data).
 
-In this task we have to accomplish two tasks, tokenize our data and filter profanity from it. The file that was sourced bellow contains the functions *to_df*, *ptokens*and *filterProfanity* that we are going to use in for this task.
-
-```{r}
-source("functions/t1_functions.R")
-```
+In this task we have to accomplish two tasks, tokenize our data and filter profanity from it
 
 ### Tokenization
 
@@ -83,6 +35,22 @@ The description of the task is: Identifying appropriate tokens such as words, pu
 The first thing we should do is to unify our data in a data frame to make it easier to work with. Let's apply the function  *to_df* to our data and remove the raw_data to save some memory. As we are here, let's also have a look at how much memory it is using.
 
 ```{r}
+to_df <- function(lists, lang){
+    ## Creating output data frame.
+    out <- data.frame(ID = character(), 
+                      Text = character(),
+                      stringsAsFactors = FALSE)
+    ## Transforming the data
+    for(name in names(lists)){
+        newdf <- data.frame(ID = paste(name, lang, 1:length(lists[[name]]), sep = "."),
+                            stringsAsFactors = FALSE)
+        newdf["Text"] <- as.character(lists[[name]])
+        ## Merging data from different sources
+        out <- bind_rows(out, newdf)
+    }
+    return(data.frame(out))
+}
+
 df_data <- to_df(raw_data, lang = "en_US")
 rm(raw_data)
 cat(sprintf("df_data is occupying %.2fMBs in memory", object.size(df_data)/1024/1024))
@@ -91,6 +59,16 @@ cat(sprintf("df_data is occupying %.2fMBs in memory", object.size(df_data)/1024/
 The quanteda package should help us with the tokenization. Let's first tokenize the texts as they are so we can have an idea of what they look like. This is a very long process so I decided to parallelize it. It take quite a toll on my computer and the logistics are still heavy, but I've been able to reduce the time in 50%.
 
 ```{r}
+ptokens <- function(docs, dnames, tolower = FALSE, ...){
+    ## tolower
+    if(tolower) docs <- tolower(docs)
+    ## Tokenizing
+    toks <- tokens(docs, ...)
+    names(toks) <- dnames
+    ##Returning output
+    return(toks)
+}
+
 system.time(raw_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, what = "word"))
 ```
 
@@ -125,11 +103,6 @@ This looks as close to perfection as we will get. Now, on to the profanity filte
 
 We want to make a product that can be used by people of all ages, so we need to remove profanity from the set of words that can be predicted. And that is what we are going to do now.
 
-First let's have a look at the number of words we have on the documents 
-
-```{r}
-length(types(f_tokens))
-```
 Now let's download a list of profanities that I found on github and read it to the workspace.
 
 ```{r}
@@ -145,25 +118,26 @@ profanity_list <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)
 profanity_list <- profanity_list$V1
 ```
 
-I created a function that will download a list of profanities I found on github and remove them from our tokens.
-
-```{r}
-f_tokens <- filterProfanity(f_tokens, profanity_list)
-```
-
-Let's have a look at the number of words we have now.
-
-```{r}
-length(types(f_tokens))
-```
-
-Looks very good, hopefully this removed most of the bad words from our data.
-
-### Profanity filter revisited 2022
-
-Now in 2022, with a little more experience, I noticed that some profanity are not made out of a single word, so filtering it after the tokenization is dangerous, we don't want kids to write "ball" and receive the recommendation "sack" even though none of these words are a problem on their own. More than that, we do have a lot of documents, which means, it is not going to be a problem to remove the ones that contain offensive words or expressions instead of removing an arbitrary word or exprtession from it. This way we guaranty that the documents are staying are going to make sense. So I included a new function in the **"functions/t1_functions.R"** file, called *filterProfDocs*, as in filter profane documents. This should take a long time but I've been able to parallelize it quite well.
+Now in 2022, with a little more experience, I noticed that some profanity are not made out of a single word, so filtering it after the tokenization is dangerous, we don't want kids to write "ball" and receive the recommendation "sack" even though none of these words are a problem on their own. More than that, we do have a lot of documents, which means, it is not going to be a problem to remove the ones that contain offensive words or expressions instead of removing an arbitrary word or expression from it. This way we guaranty that the documents that are staying are going to make sense. So I created a new function called *filterProfDocs*, as in filter profane documents. This should take a long time but I've been able to parallelize it quite well.
 
 ```{r, cache=TRUE, cache.lazy=FALSE}
+filterProfDocs <- function(docs, plist) {
+    nc <- detectCores()-1
+    cl = makePSOCKcluster(nc)
+    registerDoParallel(cl)
+    
+    suppressWarnings(pchunks <- split(plist, 1:nc))
+    
+    filterLists <- foreach(pchunk = pchunks, .combine = "c") %dopar% {
+        pattern = paste("\\b",pchunk,"\\b", sep = "",collapse = "|")
+        list(grepl(pattern, docs, ignore.case = TRUE))
+    }
+    stopCluster(cl)
+    filterLists <- matrix(unlist(filterLists), ncol = nc)
+    filter = rowSums(filterLists) == 0
+    return(filter)
+}
+
 system.time(pfilter <- filterProfDocs(df_data$Text, profanity_list))
 ```
 
@@ -191,30 +165,8 @@ rm(temp)
 ```
 Perfect, with that, let's head on to the next task.
 
-## Task 2: Exploratory data analysis
+Saving workspace.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+```{r}
+save.image("checkpoints/t1.RData")
+```

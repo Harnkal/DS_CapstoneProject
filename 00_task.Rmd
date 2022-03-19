@@ -1,0 +1,72 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Introduction and setup
+
+This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
+
+## Execution
+
+You may acess the description for this task [here](https://www.coursera.org/learn/data-science-project/supplement/Iimbd/task-0-understanding-the-problem).
+
+The code below downloads and extracts the data into the working directory (if not already downloaded).
+
+```{r}
+## Downloading
+if(!dir.exists("data")) dir.create("data")
+if(!file.exists("data/Coursera-SwiftKey.zip")) {
+    download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip",
+                  "data/Coursera-SwiftKey.zip")
+}
+## Extracting
+if(!dir.exists("data/final")) unzip("data/Coursera-SwiftKey.zip", exdir = "data")
+```
+
+The *read.data()* function reads the *n* first lines of the files for the language and source selected. As the computer I'm working on is dealing very well with the size of the files for one language only, I will read the files entirely.
+
+```{r}
+read.data <- function(lang = "en_US", s = c("blogs", "news", "twitter"), n = -1L) {
+    ## Setting source directory
+    directory <- paste("./data/final/", lang, "/", sep="")
+    ## Creating output list
+    out = list()
+    for (i in 1:length(s)) {
+        ## Opening connection
+        con <- file(paste(directory, lang, ".", s[i], ".txt", sep=""))
+        ## Reading from connection and storing in the output list
+        out[[s[i]]] <- readLines(con, n = n, warn = FALSE, encoding="UTF-8")
+        ## Closing connection
+        close(con)
+    }
+    return(out)
+} 
+
+raw_data <- read.data(lang = "en_US", s = c("blogs", "news", "twitter"), n=-1L)
+```
+
+Let's take a look at how the data looks like
+
+```{r}
+cat(paste("blogs has", length(raw_data$blogs), "observations"))
+cat(paste("\nnews has", length(raw_data$news), "observations"))
+cat(paste("\ntwitter has", length(raw_data$twitter), "observations"))
+```
+
+```{r}
+cat(paste("first line of blogs:\n", raw_data$blogs[1]))
+cat(paste("\n\nfirst line of news:\n", raw_data$news[1]))
+cat(paste("\n\nfirst line of twitter:\n", raw_data$twitter[1]))
+```
+
+Right now we have an idea how of how the data looks like, in the next steps we might jump into the data cleaning and preparation.
+
+All the functions created in this task are in **"functions/t0_functions.R"**.
+
+removing unnecessary objects an saving workspace.
+
+```{r}
+rm(read.data)
+save.image("checkpoints/t0.RData")
+```
