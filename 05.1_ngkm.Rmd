@@ -1,0 +1,489 @@
+---
+title: 'Task 5: Creative exploration'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction and setup
+
+This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
+
+The goal of this task is to make the model better, which is not difficult, seen that the model is pretty bad right now. let's load the prep and start modeling
+
+```{r}
+load("checkpoints/t5_preproc_data.RData")
+```
+
+Packages
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(quanteda)
+library(data.table)
+library(ggplot2)
+library(progress)
+library(doSNOW)
+```
+
+## Katz's Back-off model
+
+### Training
+
+So, last time I tried implementing a stupid back-off model with a data frame and it didn't really work performance wise, now I'm going to try something a little different. Form this point on, I'm going to use a data table, and I'm going to structure it in a different way to make the search faster and consequently the predictions also faster.
+
+```{r}
+"%!in%" <- Negate("%in%")
+
+ngkm_train <- function(token_object, ngrams = 2, lambda = 0.4, k = 0, npred = 3, 
+                       no_pred_list = c("<unk>", "<no>", "<url>")) {
+    
+    ## Vars prep
+    new.cols <- paste("word_", 0:(ngrams-1), sep="")
+    new.cols[new.cols=="word_0"] <- "word"
+    independent_cols <- rev(setdiff(new.cols, "word"))
+    
+    ## Creating prediction table
+    pred_table <- dfm(tokens_ngrams(token_object, n = 1:ngrams))
+    pred_table <- featfreq(pred_table)
+    
+    pred_table <- data.frame(pred_table)
+    names(pred_table) <- "frequency"
+    pred_table["full_token"] <- row.names(pred_table)
+    
+    pred_table <- as.data.table(pred_table)
+    
+    pred_table[, paste("V", 1:ngrams, sep="") := tstrsplit(full_token, "_", fixed = TRUE, fill = "<NA>")]
+    pred_table[, full_token := NULL]
+    pred_table[, ngram := rowSums(.SD != "<NA>"), .SDcol = 2:(ngrams+1)]
+    for (i in 1:ngrams) {
+        for (j in 1:ngrams) {
+            sd <- ((j<i)*i+(j>=i)*(j-i+1))+1
+            pred_table[ngram == j, new.cols[i] := .SD, .SDcol = sd]
+        }
+    }
+    pred_table[, paste("V", 1:ngrams, sep="") := rep(NULL, ngrams)]
+    
+    setcolorder(pred_table, append(rev(new.cols), "frequency"))
+
+
+    pred_table[, prob := frequency/sum(frequency), by = independent_cols]
+
+    pred_table <- subset(pred_table, frequency > k)
+    pred_table <- subset(pred_table, word %!in% no_pred_list)
+    pred_table[, adjprob := prob * (lambda ^ (ngrams - ngram))]
+    setorder(pred_table, -adjprob)
+    
+    pred_table <- pred_table[, head(.SD, npred), by = independent_cols]
+
+    ## additional info
+    input_dictionary <- unique(unlist(pred_table[,0:(ngrams-1)]))
+    
+    cutpoint <-  max(nchar(input_dictionary))*5*ngrams
+    
+    ## assembling model
+    model <- list(pred_table, input_dictionary, cutpoint, ngrams, lambda, k, npred)
+    names(model) <-  c("pred_table", "input_dictionary", "cutpoint", "ngrams", "lambda", "k", "npred")
+    
+    ## returning
+    return(model)
+}
+```
+
+I'm going to separate some testing data before training the model.
+
+```{r}
+set.seed(20220507)
+for_testing <- sample(1:length(clean_toks), 500)
+
+train_tokens <- clean_toks[-for_testing]
+test_tokens <- unlist(tokens_ngrams(clean_toks[for_testing], n = 5))
+```
+
+Now let's partition the data and train this model with the maximum size so that we can start trimming it and see how it performs in various circumstances
+
+```{r}
+system.time(ngkmodel <- ngkm_train(train_tokens, ngrams = 5, lambda = 0.4, k = 0, npred = 6))
+```
+
+Let's save this
+
+```{r}
+save(ngkmodel, file = "ngkm/ngkm.RData")
+```
+
+### Grid search
+
+First of all, I can start by find the minimum k, based on the size of the model, I'm going to trim the models and see how their sizes evolve, this way I can find a cloud of viable values without even making any tests as it doesn't matter how accurate the model is, if its size is 6GB.
+
+```{r}
+results <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("k", "npred", "size"))
+results <- data.table(results)
+for (k in 0:10) {
+    model <- ngkmodel
+    model$pred_table <- subset(model$pred_table, frequency > k)
+    for (npred in 6:1) {
+        cat("\r", sprintf("k %i npred %i   ", k, npred))
+        model$pred_table <- model$pred_table[, head(.SD, npred), 
+                                             by = eval(list(paste("word_", (model$ngram-1):1, sep=""))[[1]])]
+        model$input_dictionary <- unique(unlist(model$pred_table[,0:(model$ngram-1)]))
+        size <- as.numeric(object.size(model))
+        results <- rbindlist(list(results, list(k, npred, size)))  
+    }
+}
+```
+Let's find a reasonable breakpoint
+
+```{r}
+results[, "sizeMB" := size/(1024^2)]
+
+ggplot(results, mapping = aes(x = factor(k), y = sizeMB, fill = factor(npred))) + 
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_y_log10(breaks = 10^(-10:10), minor_breaks = rep(1:9, 21)*(10^rep(-10:10, each=9)))
+    
+```
+Looks like the only one that is completely out of the game is the k equals 0. Besides that, the difference in size when k is above 6 is mostly negligible, so I'm going to remove everything above that point.
+
+```{r}
+results <- results[k>0 & k<7,]
+
+ggplot(results, mapping = aes(x = factor(k), y = sizeMB, fill = factor(npred))) + 
+    geom_bar(stat = "identity", position = "dodge")
+```
+
+Let's work on the pre-processing function for prediction
+
+```{r}
+ngkm_replace <- function(input, what = c("url", "no", "_"), replacement = c("aurlthatwillbereplaced", "anothatwillbereplaced", " ")) {
+    
+    if (length(replacement) != length(what)){
+            stop("length of replacement must be equal to the length of what")
+    }
+    
+    if ("url" %in% what) {
+        regex <- "(((((http|ftp|https|gopher|telnet|file|localhost):\\/\\/)|(www\\.)|(xn--)){1}([\\w_-]+(?:(?:\\.[\\w_-]+)+))([\\w.,@?^=%&:\\/~+#-]*[\\w@?^=%&\\/~+#-])?)|(([\\w_-]{2,200}(?:(?:\\.[\\w_-]+)*))((\\.[\\w_-]+\\/([\\w.,@?^=%&:\\/~+#-]*[\\w@?^=%&\\/~+#-])?)|(\\.((org|com|net|edu|gov|mil|int|arpa|biz|info|unknown|one|ninja|network|host|coop|tech)|(jp|br|it|cn|mx|ar|nl|pl|ru|tr|tw|za|be|uk|eg|es|fi|pt|th|nz|cz|hu|gr|dk|il|sg|uy|lt|ua|ie|ir|ve|kz|ec|rs|sk|py|bg|hk|eu|ee|md|is|my|lv|gt|pk|ni|by|ae|kr|su|vn|cy|am|ke))))))(?!(((ttp|tp|ttps):\\/\\/)|(ww\\.)|(n--)))"
+        input <- gsub(regex, replacement[what == "url"], input, perl = TRUE)
+    }
+    
+    if ("no" %in% what) {
+        regex <- "([0-9])+(\\/([0-9])+)?(\\.([0-9])+)?"
+        input <- gsub(regex, replacement[what == "no"], input, perl = TRUE)
+    } 
+    
+    if ("_" %in% what) {
+        regex <- "_"
+        input <- gsub(regex, replacement[what == "_"], input, perl = TRUE)
+    }
+    
+    return(input)
+}
+
+ngkm_prep <- function(input, model){
+    input <- substr(input, nchar(input)-model$cutpoint, nchar(input))
+    
+    input <- tolower(input)
+    input <- ngkm_replace(input)
+    
+    tokens <- tokens(input, what = "word", remove_punct = TRUE,
+                     remove_symbols = TRUE, remove_numbers = TRUE, 
+                     remove_url = TRUE, remove_separators=TRUE,
+                     split_hyphens = TRUE, split_tags = TRUE)
+    tokens <- tokens_select(tokens, startpos = -model$ngrams+1, endpos = -1)
+    
+    tokens <- tokens_replace(tokens, "aurlthatwillbereplaced", "<url>")
+    tokens <- tokens_replace(tokens, "anothatwillbereplaced", "<no>")
+    
+    unk <- unique(unlist(tokens))
+    unk <- unk[unk %!in% model$input_dictionary]
+    tokens <- tokens_replace(tokens, unk, rep("<unk>", length(unk)))
+    
+    return(tokens)
+}
+```
+
+Let's have a look at how the prep performs on the biggest document in our df.
+
+```{r}
+ngkmodel$pred_table <- subset(ngkmodel$pred_table, frequency > 1)
+ngkmodel$input_dictionary <- unique(unlist(ngkmodel$pred_table[,0:(ngkmodel$ngram-1)]))
+
+bigdoc <- clean_df$Text[which(nchar(clean_df$Text) == max(nchar(clean_df$Text)))]
+system.time(print(ngkm_prep(bigdoc, ngkmodel)))
+```
+
+I'd say this is a very good result, considering this document is ridiculously big.
+
+Now, for the prediction function
+
+```{r}
+ngkm_predict <- function(input, model) {
+    pred_tokens <- ngkm_prep(input, model)[[1]]
+    
+    search_fields <- paste("word_", (model$ngrams-1):1, sep = "")
+    
+    pred <- model$pred_table
+    
+    for (i in 1:(model$ngrams-1)) {
+        pred <- pred[get(search_fields[i]) == pred_tokens[i]|get(search_fields[i])== "<NA>",]
+    }
+    
+    pred <- setorder(pred, -adjprob)
+    
+    pred <- pred[, head(.SD, 1), by = "word"]
+    
+    pred <- head(pred, model$npred)
+    
+    return(pred)
+}
+```
+
+Let's see how it performs in the biggest model we considered as acceptable in size
+
+```{r}
+system.time(print(ngkm_predict(bigdoc, ngkmodel)))
+```
+
+I am very happy with the result, this means that in the worst case scenario, we already have a very good prediction time.
+
+Let's move on to the evaluation function
+
+```{r}
+test_prefix <- gsub("_[^_]+$", "", test_tokens)
+test_answer <- gsub("(.*_\\s*(.*$))", "\\2", test_tokens)
+
+ngkm_evaluate <- function(prefix, answer, model, cores) {
+    
+    cl <- makeCluster(cores)
+    registerDoSNOW(cl)
+    
+    on.exit(stopCluster(cl))
+    
+    pb <- txtProgressBar(max = length(prefix), style = 3)
+    progress <- function(n) setTxtProgressBar(pb, n)
+    opts <- list(progress = progress)
+    
+    result <- foreach(i = 1:length(prefix), .combine = rbind, .options.snow = opts) %dopar% {
+        source("ngkm/ngkm_functions.R")                  
+        
+        time <- system.time(pred <- ngkm_predict(prefix[[i]], model))[[3]]
+        result <-  list(time)
+        for (n in 1:model$npred){
+            pred_n <- pred$word[1:n]
+            result <- c(result, answer[i] %in% pred_n)
+        }
+        result <- data.frame(result)
+        names(result) <- c("time", paste("top", 1:model$npred, sep = ""))
+        return(result)
+    }
+    
+    results <- data.table(result)
+    
+    results <- results[, lapply(.SD, mean)]
+    
+    return(results)
+}
+```
+
+Now that we have everything, let's just finish our grid searc data colection.
+
+```{r}
+acc <- data.table(matrix(ncol = ngkmodel$npred+3, nrow = 0))
+acc <- setnames(acc, c("k", "lambda", "time", paste("top", 1:ngkmodel$npred, sep = "")))
+
+for (k in 1:6) {
+    model <- ngkmodel
+    model$pred_table <- subset(model$pred_table, frequency > k)
+    model$input_dictionary <- unique(unlist(model$pred_table[,0:(model$ngram-1)]))
+    model$k <- k
+    for (lambda in c(0.25,0.5,0.75,1)) {
+        model$pred_table[, adjprob := prob * (lambda ^ (model$ngrams - ngram))]
+        model$lambda <- lambda
+        cat(sprintf("k %i lambda %.2f \n", k, lambda))
+        result <- ngkm_evaluate(test_prefix, test_answer, model, 14)
+        result <- result[, c("k", "lambda") := list(k, lambda)]
+        setcolorder(result, c("k", "lambda", "time", paste("top", 1:model$npred, sep = "")))
+        
+        acc <- rbindlist(list(acc, result), fill=TRUE)
+    }
+}
+```
+
+Let's have a look at the time results first. The values are not precise at all as there were some sub/super paralellization were loads were definitely not correctly managed, but they are nonetheless comparable.
+
+```{r}
+ggplot(acc, mapping = aes(x = factor(k), y = time, fill = factor(lambda))) + 
+    geom_bar(stat = "identity", position = "dodge")
+```
+
+
+Let's now have a look at the accuracy.
+
+```{r fig.width=10, fig.height=6}
+acc2 <- melt(acc[,time:=NULL], id.vars = c("k", "lambda"), variable.name = "npred", value.name = "accuracy")
+
+ggplot(acc2, mapping = aes(x = factor(k), y = accuracy, fill = factor(lambda))) + 
+    geom_bar(stat = "identity", position = "dodge") + 
+    facet_wrap(~ npred, nrow = 2)
+```
+
+It is very obvious that adding more and more predictions will increase the accuracy, but at some point it will become very clunky to do so, The k does contribute negatively to the prediction accuracy however, it seems like it does contribute positively (negatively, but this one is the lower the better) the prediction time. The lambda does seem to have an optimum point at 0.75.
+
+Other than the lambda, any other decision I make is quite arbitrary. Anyways, I'll go for the k of 2 for the size gain and the low accuracy loss compared to the k of 1. I'll also choose a npred of 6. I do think that predicting 6 outcomes is a bit much, but the gain over 5 is big, so this is what I'm going for.
+
+What accuracy I can expect for this model?
+
+```{r}
+acc[k==2 & lambda==0.25]
+```
+
+For such a model, I should expect an accuracy of 35% which is incredible, compared to the models I've seen from other students.
+
+Let's make a quick clean up before training the model again.
+
+```{r}
+rm(list = setdiff(ls(), c("clean_df", "clean_toks", "%!in%", "ngkm_evaluate", "ngkm_predict", "ngkm_prep", "ngkm_replace", "ngkm_train")))
+
+gc()
+```
+
+Now for the training. I'll use the whole dataset this time.
+
+```{r}
+system.time(ngkmodel <- ngkm_train(clean_toks, ngrams = 5, lambda = 0.25, k = 2, npred = 6))
+save(ngkmodel, file = "ngkm/ngkm.RData")
+```
+
+Let's see how it goes in the tests.
+
+### Week 3 Quiz
+
+For each of the sentence fragments below use your natural language processing algorithm to predict the next word in the sentence.
+
+1. The guy in front of me just bought a pound of bacon, a bouquet, and a case of
+
+```{r}
+system.time(print(ngkm_predict("The guy in front of me just bought a pound of bacon, a bouquet, and a case of", ngkmodel)))
+```
+
+2. You're the reason why I smile everyday. Can you follow me please? It would mean the
+
+```{r}
+system.time(print(ngkm_predict("You're the reason why I smile everyday. Can you follow me please? It would mean the", ngkmodel)))
+```
+
+3. Hey sunshine, can you follow me and make me the
+
+```{r}
+system.time(print(ngkm_predict("Hey sunshine, can you follow me and make me the", ngkmodel)))
+```
+
+4. Very early observations on the Bills game: Offense still struggling but the (error)
+
+```{r}
+system.time(print(ngkm_predict("Very early observations on the Bills game: Offense still struggling but the", ngkmodel)))
+```
+
+5. Go on a romantic date at the (error)
+
+```{r}
+system.time(print(ngkm_predict("Go on a romantic date at the", ngkmodel)))
+```
+
+6. Well I'm pretty sure my granny has some old bagpipes in her garage I'll dust them off and be on my
+
+```{r}
+system.time(print(ngkm_predict("Well I'm pretty sure my granny has some old bagpipes in her garage I'll dust them off and be on my", ngkmodel)))
+```
+
+7. Ohhhhh #PointBreak is on tomorrow. Love that film and haven't seen it in quite some
+
+```{r}
+system.time(print(ngkm_predict("Ohhhhh #PointBreak is on tomorrow. Love that film and haven't seen it in quite some", ngkmodel)))
+```
+
+8. After the ice bucket challenge Louis will push his long wet hair out of his eyes with his little (error)
+
+```{r}
+system.time(print(ngkm_predict("After the ice bucket challenge Louis will push his long wet hair out of his eyes with his little", ngkmodel)))
+```
+
+9. Be grateful for the good times and keep the faith during the (error)
+
+```{r}
+system.time(print(ngkm_predict("Be grateful for the good times and keep the faith during the", ngkmodel)))
+```
+
+10. If this isn't the cutest thing you've ever seen, then you must be (error)
+
+```{r}
+system.time(print(ngkm_predict("If this isn't the cutest thing you've ever seen, then you must be", ngkmodel)))
+```
+
+So, exactly half the time the algorithm didn't include the right answer. I did think this time it would be better, but ngrams are simply not that good for such task. I won't be training anything else I'm really tired. Let's move on to the next assignment.
+
+### Week 4 Quiz
+
+For each of the sentence fragments below use your natural language processing algorithm to predict the next word in the sentence.
+
+1. When you breathe, I want to be the air for you. I'll be there for you, I'd live and I'd (error)
+
+```{r}
+system.time(print(ngkm_predict("When you breathe, I want to be the air for you. I'll be there for you, I'd live and I'd", ngkmodel)))
+```
+
+2. Guy at my table's wife got up to go to the bathroom and I asked about dessert and he started telling me about his (error)
+
+```{r}
+system.time(print(ngkm_predict("Guy at my table's wife got up to go to the bathroom and I asked about dessert and he started telling me about his", ngkmodel)))
+```
+
+3. I'd give anything to see arctic monkeys this
+
+```{r}
+system.time(print(ngkm_predict("I'd give anything to see arctic monkeys this", ngkmodel)))
+```
+
+4. Talking to your mom has the same effect as a hug and helps reduce your
+
+```{r}
+system.time(print(ngkm_predict("Talking to your mom has the same effect as a hug and helps reduce your", ngkmodel)))
+```
+
+5. When you were in Holland you were like 1 inch away from me but you hadn't time to take a
+
+```{r}
+system.time(print(ngkm_predict("When you were in Holland you were like 1 inch away from me but you hadn't time to take a", ngkmodel)))
+```
+
+6. I'd just like all of these questions answered, a presentation of evidence, and a jury to settle the
+
+```{r}
+system.time(print(ngkm_predict("I'd just like all of these questions answered, a presentation of evidence, and a jury to settle the", ngkmodel)))
+```
+
+7. I can't deal with unsymetrical things. I can't even hold an uneven number of bags of groceries in each (hand)
+
+```{r}
+system.time(print(ngkm_predict("I can't deal with unsymetrical things. I can't even hold an uneven number of bags of groceries in each", ngkmodel)))
+```
+
+8. Every inch of you is perfect from the bottom to the
+
+```{r}
+system.time(print(ngkm_predict("Every inch of you is perfect from the bottom to the", ngkmodel)))
+```
+
+9. I’m thankful my childhood was filled with imagination and bruises from playing
+
+```{r}
+system.time(print(ngkm_predict("I’m thankful my childhood was filled with imagination and bruises from playing", ngkmodel)))
+```
+
+10. I like how the same people are in almost all of Adam Sandler's (error)
+
+```{r}
+system.time(print(ngkm_predict("I like how the same people are in almost all of Adam Sandler's", ngkmodel)))
+```
+
+So, exactly half the time the algorithm didn't include the right answer. I did think this time it would be better, but ngrams are simply not that good for such task. I won't be training anything else I'm really tired.

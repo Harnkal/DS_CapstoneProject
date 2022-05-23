@@ -1,0 +1,166 @@
+---
+title: 'Task 5: Creative exploration'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction and setup
+
+This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
+
+The goal of this task is to make the model better, which is not difficult, seen that the model is pretty bad right now.
+
+I am going to start a little different now, I am going to load the df_data as we had it in the 01_task, and rework the data before moving on to the models.
+
+```{r}
+load("checkpoints/t1.RData")
+rm(f_tokens)
+gc()
+```
+
+Importing all the libraries we are going to use in this task.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(quanteda)
+library(quanteda.textstats)
+library(ggplot2)
+```
+
+## Execution
+
+### Reworking the tokens
+
+This df_data has already been profanity filtered, so I won't need to do that again.
+
+First we are going to do something interesting, instead of removing the urls, we are going to find all of them and replace them by a dummy word like <url> just like.
+
+```{r}
+clean_df <- df_data
+
+clean_df$Text <- tolower(clean_df$Text)
+
+regex <- "(((((http|ftp|https|gopher|telnet|file|localhost):\\/\\/)|(www\\.)|(xn--)){1}([\\w_-]+(?:(?:\\.[\\w_-]+)+))([\\w.,@?^=%&:\\/~+#-]*[\\w@?^=%&\\/~+#-])?)|(([\\w_-]{2,200}(?:(?:\\.[\\w_-]+)*))((\\.[\\w_-]+\\/([\\w.,@?^=%&:\\/~+#-]*[\\w@?^=%&\\/~+#-])?)|(\\.((org|com|net|edu|gov|mil|int|arpa|biz|info|unknown|one|ninja|network|host|coop|tech)|(jp|br|it|cn|mx|ar|nl|pl|ru|tr|tw|za|be|uk|eg|es|fi|pt|th|nz|cz|hu|gr|dk|il|sg|uy|lt|ua|ie|ir|ve|kz|ec|rs|sk|py|bg|hk|eu|ee|md|is|my|lv|gt|pk|ni|by|ae|kr|su|vn|cy|am|ke))))))(?!(((ttp|tp|ttps):\\/\\/)|(ww\\.)|(n--)))"
+
+clean_df$Text <- gsub(regex, "aurlthatwillbereplaced", clean_df$Text, perl = TRUE)
+```
+
+Now we do the same for the numbers.
+
+```{r}
+regex <- "([0-9])+(\\/([0-9])+)?(\\.([0-9])+)?"
+
+clean_df$Text <- gsub(regex, "anothatwillbereplaced", clean_df$Text, perl = TRUE)
+```
+
+Let's also remove the *_* that are in the middle of the data for some reason.
+
+```{r}
+regex <- "_"
+
+clean_df$Text <- gsub(regex, " ", clean_df$Text, perl = TRUE)
+```
+
+Now that we've done that, we can follow up with the tokenization, this way we may not predict a number/url, or take the exact number/url into consideration but the algorithm will be able to take into consideration that there were a number/url in that position. We just need to make sure that we don't predict those dummy words. Also, I'm going to replace those dummy words with something less ridiculous, I just did this way so that the remove symbols didn't erase what I meant to do.
+
+```{r}
+clean_toks <- tokens(clean_df$Text, what = "word", remove_punct = TRUE,
+                     remove_symbols = TRUE, remove_numbers = TRUE, 
+                     remove_url = TRUE, remove_separators=TRUE,
+                     split_hyphens = TRUE, split_tags = TRUE)
+names(clean_toks) <- clean_df$ID
+```
+
+Now let's replace the summy words for something less weird.
+
+```{r}
+clean_toks <- tokens_replace(clean_toks, "aurlthatwillbereplaced", "<url>")
+clean_toks <- tokens_replace(clean_toks, "anothatwillbereplaced", "<no>")
+```
+
+For some reason, there are some underscores that polute 
+
+Lastly, instead of removing the words that are not in the english dictionary, we are going to replace them with the dummy token <unk>
+
+```{r}
+## Define English dictionary file path
+file_path <- "data/final/en_US/words_alpha.txt"
+## Download if not already downloaded
+if(!file.exists(file_path)){
+    url <- "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
+    download.file(url, destfile = file_path, method = "curl")
+}
+
+english_dictionary <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)$V1
+
+unk_toks <- tokens_remove(clean_toks, english_dictionary, valuetype = "fixed")
+
+unk_toks <- unique(unlist(unk_toks))
+
+noshorts <- gsub("'m|re|n't|'s|'ve|'ll|'d", "", unk_toks, fixed = TRUE)
+
+"%!in%" <- Negate("%in%")
+
+unk_toks <- unk_toks[noshorts %!in% english_dictionary]
+
+unk_toks <- unk_toks[unk_toks %!in% c("<url>", "<no>")]
+
+clean_toks <- tokens_replace(clean_toks, unk_toks, rep("<unk>", length(unk_toks)))
+```
+
+Finally, we remove possible empty documents
+
+```{r}
+cat(sprintf("%i tokens were removed", sum(ntoken(clean_toks) < 1)))
+
+clean_df <- clean_df[ntoken(clean_toks) > 0,]
+clean_toks <- clean_toks[ntoken(clean_toks) > 0,]
+```
+
+Clean up
+
+```{r}
+rm(list = setdiff(ls(), c("clean_df", "clean_toks")))
+save.image("checkpoints/t5_preproc_data.RData")
+```
+
+### Exploration
+
+Lets make a quick exploration.
+
+```{r}
+ngram_stats <- list()
+for(i in 1:6){
+    temp <- dfm(tokens_ngrams(clean_toks, n = i))
+    ngram_stats[[i]] <- textstat_frequency(temp, n=25)
+    ngram_stats[[i]]["rank"] <- 1:25
+    ngram_stats[[i]]["ngram"] <- i
+}
+
+ngram_stats <- do.call(rbind, ngram_stats)
+```
+
+That took longer than I expected, let's see the results.
+
+```{r fig.align = 'center', fig.height=6, fig.width=10}
+ggplot(ngram_stats, mapping = aes(x = rank, y = frequency)) + 
+    geom_bar(stat = "identity", fill = "aquamarine3") +
+    geom_bar(aes(y = -0.175*frequency), stat = "identity", fill = "aquamarine3") +
+    geom_text(aes(y=0,label=feature),angle=0,size=3,hjust=0, vjust = 0.25, colour = "black") +
+    geom_text(aes(y=0,label=paste(frequency,"- ")),angle=0,size=3,hjust=1, vjust = 0.25, colour = "black") +
+    theme_bw() +
+    theme(axis.text.y = element_blank(), axis.text.x = element_blank(),
+          axis.title.y = element_blank(), axis.title.x = element_blank(),
+          axis.line.y = element_blank(), axis.line.x = element_blank(),
+          axis.ticks.y = element_blank(), axis.ticks.x = element_blank(),
+          strip.background = element_rect(fill="aquamarine3", color = "white"),
+          panel.grid = element_blank(), panel.border = element_blank()) +
+    facet_wrap(~ngram, nrow = 2, scales = "free") +
+    coord_flip() +
+    scale_x_reverse()
+```
+
+It does look like hexagrams were a bit much as some weird stuff started happening. Also, no worries about the long streaks of <unk> and <no>, we shall remove all the predictions that result in a dummy token.
+

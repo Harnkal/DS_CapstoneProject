@@ -1,0 +1,451 @@
+---
+title: "Task 2: Exploratory data analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, cache.lazy = FALSE, 
+                      fig.align = 'center', fig.height=6, fig.width=10)
+```
+
+## Introduction and setup
+
+This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
+
+Let's also load the workspace from last step.
+
+```{r}
+load("checkpoints/t1.RData")
+```
+
+Importing all the libraries we are going to use in this task.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(quanteda)
+library(quanteda.textplots)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(dplyr)
+library(tibble)
+library(SnowballC)
+```
+
+## Execution
+
+You may acess the description for this task [here](https://www.coursera.org/learn/data-science-project/supplement/BePVz/task-2-exploratory-data-analysis)
+
+First of all, I'll do something mostly useless for this application, but I always wanted to do it... a word cloud.
+
+```{r fig.align = 'center', fig.height=8, fig.width=8}
+dfmat <- dfm(f_tokens)
+textplot_wordcloud(dfmat, rotation = 0.25, 
+                   color = rev(RColorBrewer::brewer.pal(10, "RdBu")),
+                   max_words = 1000)
+```
+
+Well that was cool I guess. The cool part is that now I have a document feature matrix. This format of data transforms the string data into a matrix of how many times each word (features) happens in each document. It is a very sparse way of organizing the data but it is very efficient for the computer to read, as computers are not very good with words.
+
+### Frequencies
+
+Let's start serious business. How many words to we have in the dataset?
+
+```{r}
+nfeat(dfmat)
+```
+
+Quite a lot of words. What are the top 100 and what is their frequency? I know there is a package called quanteda.textstats but it was producing very weird results with dplyr so I decided to do everything by hand. It was getting very cumbersome, so I decided to create a function for that.
+
+```{r}
+dfm_frequency <- function(dfm, freqType = "both", n = -1, groups = NULL) {
+    output <- list()
+    
+    if(is.null(groups)){
+        groups = rep("nogroups", ndoc(dfm))
+    }
+    
+    for(group in unique(groups)) {
+        if(freqType == "featFreq" | freqType == "both") {
+            featFreq <- data.frame(featfreq(dfm_subset(dfm, groups==group)))
+            colnames(featFreq) <- "featFreq"
+            featFreq <- featFreq %>% 
+                rownames_to_column("feature") %>%
+                arrange(-featFreq) %>%
+                transmute(feature = factor(feature, levels = unique(feature)), 
+                          featFreq = featFreq, 
+                          group = group,
+                          rank = 1:n()) %>%
+                head(n) %>%
+                gather(key = "freqType", value = "frequency", featFreq, factor_key = TRUE)
+        }
+        
+        if(freqType == "docFreq" | freqType == "both") {
+            docFreq <- data.frame(docfreq(dfm_subset(dfm, groups==group)))
+            colnames(docFreq) <- "docFreq"
+            docFreq <- docFreq %>% 
+                rownames_to_column("feature") %>%
+                arrange(-docFreq) %>%
+                transmute(feature = factor(feature, levels = unique(feature)), 
+                          docFreq = docFreq, 
+                          group = group,
+                          rank = 1:n()) %>%
+                head(n) %>%
+                gather(key = "freqType", value = "frequency", docFreq, factor_key = TRUE)
+        }
+        
+        if(freqType == "featFreq") {
+            output <- append(output, list(featFreq))
+        }
+        
+        if(freqType == "docFreq") {
+            output <- append(output, list(docFreq))
+        }
+        
+        if(freqType == "both") {
+            temp <- rbind(featFreq, docFreq)
+            output <- append(output, list(temp))
+        }
+        
+    }
+
+    output <- do.call(rbind, output)
+    
+    return(output)
+}
+```
+
+```{r}
+word_frequency <- dfm_frequency(dfmat, n=100)
+
+ggplot(word_frequency, mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+This is interesting and at the same time expected, the distribution is exponential. However, when you consider the frequency that a word appears in a document (not total frequency, but only count once per document the word appears), some words lose several positions in rank, as an example we have the word *was*, it may appear several times in documents that are in the past tense, but will not appear at all if the document is written in the the present or future tense.
+
+Does this change between source types? I'll show only the top 25 this time for space sake as the behavior seems to be assymptotic. I know this is revolting, but I really wanted to put the charts in decreasing order without having to load *griExtra*.
+
+```{r}
+groups <- vapply(strsplit(docnames(dfmat),"\\."), `[`, 1, FUN.VALUE=character(1))
+
+word_frequency <- dfm_frequency(dfmat, n=25, groups = groups) %>%
+    mutate(lvl = factor(paste(feature, group, sep = "."), levels = unique(paste(feature, group, sep = "."))))
+
+ggplot(word_frequency, mapping = aes(x = lvl, y = frequency, color = freqType)) +
+    geom_text(aes(y=-1,label=feature),angle=90,size=3,hjust=1, vjust = 0.25, colour = "black") +
+    theme(axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.line.x = element_blank(),
+          axis.ticks.x = element_blank()) +
+    geom_point(alpha = 0.4) +
+    facet_grid(cols = vars(group), scales = "free_x")
+```
+
+The differences in the distribution are small, but the word *the* is heavily more used in blogs than in any other source.
+
+I got curious about words in the top 50 of each source that do not appear in the top 100 of other sources. Let's have a look at that.
+
+```{r}
+word_frequency <- dfm_frequency(dfmat, freqType = "featFreq",n=100, 
+                                groups = groups)
+
+word_frequency %>% filter(freqType=="featFreq") %>% group_by(feature) %>% 
+    summarise(count = length(group), rank = max(rank), group = group) %>%
+    filter(count == 1, rank < 50)
+```
+
+Not very useful, but at least I'm not curious anymore.
+
+Let's answer a question from the task description: How many unique words do you need in a frequency sorted dictionary to cover 50% of all word instances in the language? 90%?
+
+```{r}
+word_frequency <- dfm_frequency(dfmat, freqType = "featFreq") %>%
+    mutate(percent = frequency/sum(frequency), cumPercent = cumsum(percent))
+
+cat(sprintf("50%% of the data can be reached with %i words\n90%% of the data can be reached with %i words\n95%% of the data can be reached with %i words", 
+            min(which(word_frequency$cumPercent > 0.5)),
+            min(which(word_frequency$cumPercent > 0.9)),
+            min(which(word_frequency$cumPercent > 0.95))))
+
+```
+
+The number of words that can cover most of the data is surprisingly small. what is the frequency of the last word to be part of the 0.5 percentile?
+
+```{r}
+word_frequency[min(which(word_frequency$cumPercent > 0.5)),]
+```
+
+Even though this is still a very high frequency, it represents only 0.1% of the words in the dataset, what about the 0.9 percentile?
+
+```{r}
+word_frequency[min(which(word_frequency$cumPercent > 0.9)),]
+```
+
+Only that?! This is a big difference, we are talking about only 0.001% of the words in the dataset. I'm starting to see that that are lots of non actual words in our data, but then again, if people write it, mainly if they write it so often, I want to predict it.
+
+Back to the non actual words, we should take a look at that, how many non English words do we have? to find this out, let's download, if not already downloaded, and load a dictionary of English words that I found on github
+
+```{r}
+## Define English dictionary file path
+file_path <- "data/final/en_US/words_alpha.txt"
+## Download if not already downloaded
+if(!file.exists(file_path)){
+    url <- "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
+    download.file(url, destfile = file_path, method = "curl")
+}
+
+english_dictionary <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)$V1
+english_dictionary[1:10]
+```
+
+Now we the o have a look at how the data would look like if it only had the words that are not in the dictionary
+
+```{r}
+nenglish_dfmat <- dfm_remove(dfmat, english_dictionary)
+
+featnames(nenglish_dfmat)[1:10]
+```
+
+How many words would it have?
+
+```{r}
+nfeat(nenglish_dfmat)
+```
+
+it is most of the words in the dataset.
+
+it seems like there are words that we want to remove from the pool after all, like proper names and obviously non standard English words. but some of them are commonly used like shortenings for negatives, **eg. it's**.let's have a look at the top 100 in this new dfm.
+
+```{r}
+nenglish_word_frequency <- dfm_frequency(nenglish_dfmat, n=100)
+
+ggplot(nenglish_word_frequency, mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+I'll remove the most used patterns like *n't* and *'s* to see how many are left.
+
+```{r}
+nenglish_word_frequency <- dfm_frequency(nenglish_dfmat, freqType = "featFreq")
+
+to_remove <- nenglish_word_frequency$feature
+
+common_shorts <- c("'m", "'re", "n't", "'s", "'ve", "'ll", "'d")
+
+for(pat in common_shorts){
+    to_remove <- str_replace(to_remove, pat, "")
+}
+
+length(to_remove[to_remove %in% english_dictionary])
+```
+
+13652 of the words we wanted to remove are actually in the English dictionary but they have contractions. now let's have another look at words that we actually want to remove.
+
+```{r}
+to_remove <- nenglish_word_frequency$feature[to_remove %in% english_dictionary]
+
+nenglish_dfmat <- dfm_remove(nenglish_dfmat, to_remove)
+
+nenglish_word_frequency <- dfm_frequency(nenglish_dfmat, n=100)
+
+ggplot(nenglish_word_frequency, mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+I can see many proper names, acronyms and mainly brand names. The only category that I really wanted to predict are brand names but it would be incredibly hard to separate them here so I'm going to remove them from the tokens too.
+
+```{r}
+f_tokens <- tokens_remove(f_tokens, featnames(nenglish_dfmat))
+```
+
+How many features do we have now?
+
+```{r}
+dfmat <- dfm(f_tokens)
+nfeat(dfmat)
+```
+
+I think we are left with a much more manageable dfm. Let's have a look the other way around. We have many documents in this corpus, are the English words that are in the dictionary and do not appear in the corpus really worth worrying about? let's get a sample of them.
+
+```{r}
+set.seed(20220330)
+sample(english_dictionary[!english_dictionary %in% featnames(dfmat)], 20)
+```
+
+Very few of these words are barely used and the rest of them are literally NEVER used. If we had too many words missing, we could identify synonyms for them, duplicate the sentences that have these synonyms and replace the words in these duplicated sentences. But in this case, it is completely unnecessary.
+
+let's remove the garbage from the WS and move ahead for the n-grams.
+
+```{r}
+rm(list = setdiff(ls(), c("df_data", "f_tokens", "dfmat", "dfm_frequency")))
+gc()
+```
+
+### n-grams
+
+How many 2-grams do we have in the data.
+
+```{r}
+dfmat2 <- dfm(tokens_ngrams(f_tokens, n=2))
+
+nfeat(dfmat2)
+```
+
+This is much more than the number of tokens! Not surprisingly though, how much of an increase is that exactly?
+
+```{r}
+cat(sprintf("The set of 2-grams represent %.2f%% of the the 1-grams set", nfeat(dfmat2)/nfeat(dfmat)*100))
+```
+
+Wow! let's see the top 100. I bet all of them have the word the.
+
+```{r}
+word_freq <- dfm_frequency(dfmat2)
+ggplot(word_freq[word_freq$rank < 101,], mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+There is still hope!
+
+```{r}
+word_freq %>% filter(feature %in% c("i_love", "i_hate")) %>% filter(freqType == "featFreq")
+```
+
+how about 3-grams?
+
+```{r}
+dfmat2 <- dfm(tokens_ngrams(f_tokens, n=3))
+
+nfeat(dfmat2)
+```
+
+percentage again
+
+```{r}
+cat(sprintf("The set of 3-grams represent %.2f%% of the the 1-grams set", nfeat(dfmat2)/nfeat(dfmat)*100))
+```
+
+top 100 again.
+
+```{r}
+word_freq <- dfm_frequency(dfmat2)
+ggplot(word_freq[word_freq$rank < 101,], mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+then again, I still have hope in humanity.
+
+```{r}
+word_freq %>% filter(feature %in% c("i_love_you", "i_hate_you")) %>% filter(freqType == "featFreq")
+```
+
+cleaning up again
+
+```{r}
+rm(list = setdiff(ls(), c("df_data", "f_tokens", "dfmat")))
+gc()
+```
+
+### Doc Sizes
+
+there is one thing that I should have asked in the begining, but here we are, looking at it in the end of the exploration task.
+
+what is the distribution of the sizes of documents?
+
+```{r}
+df_data$size <- nchar(df_data$Text)
+
+ggplot(df_data, mapping = aes(x = size)) +
+    geom_histogram(bins = 60)
+```
+
+There is a very big document which is preventing us to see the distribution clearly (an outlier). I'll try to find a max range that is acceptable
+
+```{r}
+ggplot(df_data[df_data$size<1150,], mapping = aes(x = size)) +
+    geom_histogram(bins = 60)
+```
+
+Not surprisingly, most of the docs is less than 140 char long, as many of the documents are from twitter. let's divide it by group.
+
+```{r}
+df_data$group <- vapply(strsplit(docnames(dfmat),"\\."), `[`, 1, FUN.VALUE=character(1))
+
+ggplot(df_data, mapping = aes(x = size)) +
+    geom_histogram(bins = 60) +
+    facet_grid(cols = vars(group), scales = "free")
+```
+
+News and blogs can be very long. Let's limit it again to to have a look at the distribution.
+
+```{r}
+ggplot(df_data[df_data$size<1150,], mapping = aes(x = size)) +
+    geom_histogram(bins = 60) +
+    facet_grid(cols = vars(group), scales = "free")
+```
+
+All of them look to be logarithmic, with some obvious range differences.
+
+let's have a look at the biggest and smallest documents. I won't print the biggest document because my computer doesn't like rendering it with the amount of memory I have. But here is it's name in case you are wondering.
+
+```{r}
+df_data$ID[df_data$size == max(df_data$size)]
+```
+
+Amazing, what is the source of it?
+
+```{r}
+df_data$group[df_data$size == max(df_data$size)]
+```
+
+how long is it?
+
+```{r}
+df_data$size[df_data$size == max(df_data$size)]
+```
+
+It is not on the news group! This is proof that you don't need to work for a news channel or papers to cover an important event to humanity.
+
+What about the smallest one?
+
+```{r}
+df_data$Text[df_data$size == min(df_data$size)]
+```
+
+Wtf?!?! why it has only single chars?! did I remove all the meaning of this document? amazing! I think I need to remove it. first let's see what the tokens here look like.
+
+```{r}
+f_tokens[df_data$size == min(df_data$size)][1]
+```
+
+It is empty as this document only has a number. One thing just occurred me... with all the removals we've made, we might have ended up creating many empty documents, algorithm the document is still there. Besides that, I decided to remove all the one char words. The keyboard already has a key for that, I don't need to predict it.
+
+```{r}
+f_tokens <- tokens_remove(f_tokens, featnames(dfmat)[nchar(featnames(dfmat)) == 1])
+
+df_data <- df_data[ntoken(f_tokens) > 0,]
+f_tokens <- f_tokens[ntoken(f_tokens) > 0,]
+
+print(df_data$Text[df_data$size == min(df_data$size)][1:25])
+```
+
+Do I want to predict for docs with only one token? I don't think so. I'll only accept documents with at least 2 tokens
+
+```{r}
+df_data <- df_data[ntoken(f_tokens) > 1,]
+f_tokens <- f_tokens[ntoken(f_tokens) > 1,]
+
+print(df_data$Text[df_data$size == min(df_data$size)][1:25])
+```
+
+I'm happy with the results now. let's go ahead like this.
+
+```{r}
+rm(list = setdiff(ls(), c("df_data", "f_tokens")))
+save.image("checkpoints/t2.RData")
+```

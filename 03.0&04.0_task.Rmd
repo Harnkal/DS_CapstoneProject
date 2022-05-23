@@ -1,0 +1,472 @@
+---
+title: 'Task 3: Modeling'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction and setup
+
+This is a report for own use, so I can keep track of the advances made in the project. Each task will have its own section where all the objectives are achieved before advancing to the next task.
+
+Let's also load the workspace from last step.
+
+```{r}
+load("checkpoints/t2.RData")
+rm(df_data)
+gc()
+```
+
+Importing all the libraries we are going to use in this task.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(quanteda)
+library(dplyr)
+library(tibble)
+library(stringr)
+library(progress)
+library(doParallel)
+```
+
+## Execution
+
+### Creating the logic behind the model
+
+I'll create an n-gram model and I am going to store it in a data frame for easy manipulation and visualization.
+
+First, I'll create a function to train and define the model.
+
+```{r}
+# looks like I'll need a couple of other functions first
+get_pref <- function(x){
+    first_split <- strsplit(x, "_", fixed = TRUE)
+    
+    prefix <- c()
+    
+    for(i in 1:length(first_split)){
+        if(length(first_split[[i]]) < 2){
+            prefix[i] <- ""
+        } else{
+            prefix[i] <- paste(head(first_split[[i]], -1), collapse = "_")[1]
+        }
+    }
+    
+    return(prefix)
+}
+
+get_suf <- function(x){
+    first_split <- strsplit(x, "_", fixed = TRUE)
+    
+    suf <- c()
+    
+    for(i in 1:length(first_split)){
+        suf[i] <- tail(first_split[[i]], 1)[1]
+    }
+    
+    return(suf)
+}
+
+ngm_train <- function(token_object, maxngrams = 1, k = 0, npred = 3){
+    ## load packages
+    require(quanteda)
+    require(dplyr)
+    require(tibble)
+    
+    model <- list()
+    
+    for(n in 1:maxngrams){
+        dfmat <- dfm(tokens_ngrams(token_object, n = n), remove_padding = TRUE)
+    
+        nmodel <- data.frame(featfreq(dfmat))
+        colnames(nmodel) <- "frequency"
+        model[[n]] <- nmodel %>% 
+            rownames_to_column("feature") %>%
+            transmute(ngram = n,
+                      prefix = get_pref(feature), 
+                      sufix = get_suf(feature), 
+                      frequency = frequency) %>%
+            group_by(prefix) %>%
+            mutate(proportion = frequency/sum(frequency)) %>%
+            arrange(prefix, desc(frequency)) %>% 
+            filter(frequency > k) %>%
+            slice(1:npred)
+    }
+    
+    model = do.call(rbind, model)
+    
+    return(model)
+}
+```
+
+Now that we have a model, We must create a function to predict the next word that given a token, will always return npred possibilities for the next word.
+
+```{r}
+get_suf2 <- function(x){
+    first_split <- strsplit(x, "_", fixed = TRUE)
+    
+    prefix <- c()
+    
+    for(i in 1:length(first_split)){
+        if(length(first_split[[i]]) < 2){
+            prefix[i] <- ""
+        } else{
+            prefix[i] <- paste(tail(first_split[[i]], -1), collapse = "_")[1]
+        }
+    }
+    
+    return(prefix)
+}
+
+ngm_predict <- function(token, model, npred = 3){
+    max_ngrams <- length(strsplit(token, "_", fixed = TRUE)[[1]]) + 1
+    
+    prediction <- model %>%
+        filter(ngram == max_ngrams) %>%
+        filter(prefix == token)
+    
+    if(nrow(prediction) < npred){
+        while(nrow(prediction) < npred & max_ngrams > 0){
+            max_ngrams <- max_ngrams-1
+            token <- get_suf2(token)
+            backroll_pred <- model %>%
+                filter(ngram == max_ngrams) %>%
+                filter(prefix == token) %>%
+                filter(!sufix %in% prediction$sufix)
+            
+            
+            prediction <-  rbind(prediction, backroll_pred)
+        }
+    }
+    
+    prediction <- head(prediction, npred)
+    
+    return(prediction)
+}
+```
+
+Finally, I need a function to test the model. I ended up needing to parallelize this function because it was slow as a slug, but to do so, I needed to define all the functions to all the workers, so this function ended up gigantic. A single prediction is fast for a single cor, but when mass predicting we need some more power.
+
+```{r}
+ngm_test <- function(token_list, model, npred = 3){
+    require(doParallel)
+    
+    nc <- detectCores()-1
+    cl = makePSOCKcluster(nc)
+    registerDoParallel(cl)
+    
+    result <- foreach(i = 1:length(token_list), .combine = "c", .packages='raster') %dopar% {
+        #libraries for the workers
+        library(dplyr)
+        #functions for the workers
+        get_pref <- function(x){
+            first_split <- strsplit(x, "_", fixed = TRUE)
+            
+            prefix <- c()
+            
+            for(i in 1:length(first_split)){
+                if(length(first_split[[i]]) < 2){
+                    prefix[i] <- ""
+                } else{
+                    prefix[i] <- paste(head(first_split[[i]], -1), collapse = "_")[1]
+                }
+            }
+            
+            return(prefix)
+        }
+        get_suf <- function(x){
+            first_split <- strsplit(x, "_", fixed = TRUE)
+            
+            suf <- c()
+            
+            for(i in 1:length(first_split)){
+                suf[i] <- tail(first_split[[i]], 1)[1]
+            }
+            
+            return(suf)
+        }
+        get_suf2 <- function(x){
+            first_split <- strsplit(x, "_", fixed = TRUE)
+            
+            prefix <- c()
+            
+            for(i in 1:length(first_split)){
+                if(length(first_split[[i]]) < 2){
+                    prefix[i] <- ""
+                } else{
+                    prefix[i] <- paste(tail(first_split[[i]], -1), collapse = "_")[1]
+                }
+            }
+            
+            return(prefix)
+        }
+        ngm_predict <- function(token, model, npred = 3){
+            max_ngrams <- length(strsplit(token, "_", fixed = TRUE)[[1]]) + 1
+            
+            prediction <- model %>%
+                filter(ngram == max_ngrams) %>%
+                filter(prefix == token)
+            
+            if(nrow(prediction) < npred){
+                while(nrow(prediction) < npred & max_ngrams > 0){
+                    max_ngrams <- max_ngrams-1
+                    token <- get_suf2(token)
+                    backroll_pred <- model %>%
+                        filter(ngram == max_ngrams) %>%
+                        filter(prefix == token) %>%
+                        filter(!sufix %in% prediction$sufix)
+                    
+                    
+                    prediction <-  rbind(prediction, backroll_pred)
+                }
+            }
+            
+            prediction <- head(prediction, npred)
+            
+            return(prediction)
+        }
+        
+        #to the actual loop
+        pref <- get_pref(token_list[[i]])
+        suf <- get_suf(token_list[[i]])
+        pred <- ngm_predict(pref, model, npred)
+        
+        suf %in% pred$sufix
+    }
+    
+    stopCluster(cl)
+    
+    return(mean(result))
+}
+```
+
+### Testing the model
+
+This is actually the task 4
+
+I will now, create a routine to create several "proto-models" and test them to gather data so that I can then train the final model using the whole data set and the same parameters in the hopes of achieving similar results. Of course the K factor is going to be a problem as it is not a proportional factor, but we can face this problem when it comes.
+
+For that we will use 10% of the dataset to train, and 100 documents to test.
+
+```{r}
+set.seed(20220416)
+train_tokens <- f_tokens[sample(1:length(f_tokens), length(f_tokens)*0.1+100)]
+
+for_testing <- sample(1:length(train_tokens), 100)
+
+test_tokens <- train_tokens[for_testing]
+train_tokens <- train_tokens[-for_testing]
+```
+
+now, let's create the training routine
+
+```{r}
+test_results <- data.frame()
+
+for(max_ngrams in 1:3){
+    model <- ngm_train(train_tokens, max_ngrams, 0, 6)
+    for(k in c(100,10,5,4,3,2,1,0)){
+        for(npred in 6:1){
+            cat("\r", sprintf("max_ngrams %i k %i npred %i   ", 
+                                     max_ngrams, k, npred))
+            submodel <- model %>% filter(frequency > k) %>% slice(1:npred)
+            ngram_token <- unlist(tokens_ngrams(test_tokens, n = max_ngrams))
+            time <- system.time(accuracy <- ngm_test(ngram_token, 
+                                                     submodel, npred = npred))[3]
+            n_preds <- length(ngram_token)
+            
+            test_results <- rbind(test_results, 
+                                  data.frame(max_ngrams, 
+                                             k, npred, 
+                                             accuracy,
+                                             size = as.numeric(object.size(submodel)),
+                                             test_time = time,
+                                             test_n_preds = n_preds))
+        }
+    }
+}
+
+print(test_results)
+```
+
+Let's save our progress until here, before I lose the results and my mind (this thing took forever).
+
+```{r}
+rm(list = setdiff(ls(), c("f_tokens", "test_results", "get_pref", "get_suf", "get_suf2", "ngm_predict", "ngm_test", "ngm_train")))
+save.image("checkpoints/t3&t4_parc.RData")
+```
+
+### Analysing test results
+
+```{r}
+load("checkpoints/t3&t4_parc.RData")
+```
+
+```{r}
+library(ggplot2)
+library(quanteda)
+library(doParallel)
+```
+
+There are 2 important factors that I want to analyse here. The first one is the size of the model vs. the accuracy. Let's have a look at it grafically to see what is the best cost benefit we can have here.
+
+```{r fig.width=10, fig.height=6}
+ggplot(data = test_results, mapping = aes(x = size, y = accuracy,
+                                          shape = factor(max_ngrams), 
+                                          color = factor(k))) + 
+    geom_point(size = 2) +
+    scale_color_brewer(palette = "Dark2") +
+    scale_x_log10() +
+    theme(legend.position = "bottom") +
+    facet_wrap(~npred, nrow = 2)
+```
+
+Trigrams with 6 predictions and a k factor of 3 seems to be very promissing, let's have a look at the prediciton timings. I'll filter out the trigrams with k = 0 because they are already too expensive for the benefit, and will probably polute the visualization
+
+```{r fig.width=10, fig.height=6}
+ggplot(data = test_results[test_results$k!=0 | test_results$max_ngrams!=3,], 
+       mapping = aes(x = test_time/test_n_preds, y = accuracy,
+                     shape = factor(max_ngrams),
+                     color = factor(k))) + 
+    geom_point(size = 2) +
+    scale_color_brewer(palette = "Dark2") +
+    theme(legend.position = "bottom") +
+    facet_wrap(~npred, nrow = 2)
+```
+
+Once again trigrams with 6 predictions and a k factor of 3 seems to have a very good response time of less than a tenth of a second.
+
+### Training the ngram model.
+
+let's now move on to train our model in the whole dataset save for 500 documents for later testing.
+
+```{r}
+set.seed(20220419)
+for_testing <- sample(1:length(f_tokens), 500)
+
+train_tokens <- f_tokens[-for_testing]
+test_tokens <- unlist(tokens_ngrams(f_tokens[for_testing], n = 3))
+```
+
+Training.
+
+```{r}
+ngmodel <- ngm_train(train_tokens, maxngrams = 3, k = 3, npred = 6)
+```
+
+Testing.
+
+```{r}
+time <- system.time(accuracy <- ngm_test(test_tokens, 
+                                         ngmodel, npred = 6))[3]
+```
+
+Printing results.
+
+```{r}
+data.frame(max_ngrams = 3, k = 3, npred = 6, accuracy, size = as.numeric(object.size(ngmodel)),
+           test_time = time, test_n_preds = length(test_tokens))
+```
+The accuracy seems nice. what is the size in MB?
+
+```{r}
+print(object.size(ngmodel), units = "MB")
+```
+It is not big. How long does it take to make a single prediction? (not in parallel)
+
+```{r}
+system.time(print(ngm_predict("i_like", ngmodel, npred = 6)))
+```
+Taking 3.5 seconds is way too much, mainly on my computer, in shiny apps this is going to take forever to process. I have to be more creative on how to train this model. I'm starting to think that ngram models are not the answer here. They get way too big way too fast, they are very inaccurate and are very clunky to process. Also, I regret removing one letter words. Maybe I am doing something wrong. I am going to use this model to finish the week 3 task and see if it is behaving accordingly.
+
+### Week 3 Quiz
+
+For each of the sentence fragments below use your natural language processing algorithm to predict the next word in the sentence.
+
+1. The guy in front of me just bought a pound of bacon, a bouquet, and a case of
+
+```{r}
+print(ngm_predict("case_of", ngmodel, npred = 6))
+```
+
+2. You're the reason why I smile everyday. Can you follow me please? It would mean the
+
+```{r}
+print(ngm_predict("mean_the", ngmodel, npred = 6))
+```
+
+3. Hey sunshine, can you follow me and make me the (error)
+
+```{r}
+print(ngm_predict("me_the", ngmodel, npred = 6))
+```
+
+4. Very early observations on the Bills game: Offense still struggling but the (error)
+
+```{r}
+print(ngm_predict("but_the", ngmodel, npred = 6))
+```
+
+5. Go on a romantic date at the (error)
+
+```{r}
+print(ngm_predict("at_the", ngmodel, npred = 6))
+```
+
+6. Well I'm pretty sure my granny has some old bagpipes in her garage I'll dust them off and be on my
+
+```{r}
+print(ngm_predict("on_my", ngmodel, npred = 6))
+```
+
+7. Ohhhhh #PointBreak is on tomorrow. Love that film and haven't seen it in quite some
+
+```{r}
+print(ngm_predict("quite_some", ngmodel, npred = 6))
+```
+
+8. After the ice bucket challenge Louis will push his long wet hair out of his eyes with his little (error)
+
+```{r}
+print(ngm_predict("his_little", ngmodel, npred = 6))
+```
+
+9. Be grateful for the good times and keep the faith during the (error)
+
+```{r}
+print(ngm_predict("during_the", ngmodel, npred = 6))
+```
+
+10. If this isn't the cutest thing you've ever seen, then you must be (error)
+
+```{r}
+print(ngm_predict("must_be", ngmodel, npred = 6))
+```
+
+So, more than half the time the algorithm didn't include the right answer. This is much worse than I imagined, I got to step up my game on this thing, there are several things that I didn't know, but maybe not removing the stopwords for this kind of model was a mistake. Anyways it seems like this kind of model is a mistake anyways, it is short sighted and not scalable, when you try to increase the amoun of words it takes into account to make the decision it get mad big, and takes forever to process a decision. Maybe I'm doing this wrong.
+
+```{r}
+rm(list = setdiff(ls(), c("ngmodel", "get_pref", "get_suf", "get_suf2", "ngm_predict", "ngm_test", "ngm_train")))
+save.image("checkpoints/t3&t4.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

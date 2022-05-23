@@ -1,0 +1,627 @@
+---
+title: "Milestone Report"
+author: "ROCHA, Rafael"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, cache.lazy = FALSE, 
+                      fig.align = 'center', fig.height=6, fig.width=10)
+```
+
+## Introduction
+
+This documents aims to load, clean and explore the data for the Data Science Capstone course from Coursera by John Hopkins University.
+
+I had  done it all in separate documents that I thought were for personal use, so I willbring everything I did in the most concise way possible losing as little as possible of what I learned from the data so far.
+
+Here is a list of libraries used in this report
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(doParallel)
+library(dplyr)
+library(quanteda)
+library(quanteda.textplots)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(SnowballC)
+```
+
+## Reading the data
+
+The code below downloads data (if not already downloaded).
+
+```{r}
+## Downloading
+if(!dir.exists("data")) dir.create("data")
+if(!file.exists("data/Coursera-SwiftKey.zip")) {
+    download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip",
+                  "data/Coursera-SwiftKey.zip")
+}
+## Extracting
+if(!dir.exists("data/final")) unzip("data/Coursera-SwiftKey.zip", exdir = "data")
+```
+
+The *read.data()* function reads the *n* first lines of the files for the language and source selected, if n is not an integer it will be considered a proportion of the data to be read.
+
+```{r}
+read.data <- function(lang = "en_US", s = c("blogs", "news", "twitter"), n = -1L, seed = 1) {
+    ## Setting source directory
+    directory <- paste("./data/final/", lang, "/", sep="")
+    if(!is.integer(n)){
+        prop <- n
+        n <- -1L
+    }
+    ## Creating output list
+    out = list()
+    for (i in 1:length(s)) {
+        ## Opening connection
+        con <- file(paste(directory, lang, ".", s[i], ".txt", sep=""))
+        ## Reading from connection and storing in the output list
+        out[[s[i]]] <- readLines(con, n = n, warn = FALSE, encoding="UTF-8")
+        if(exists("prop")){
+            replace <- prop > 1
+            size <- length(out[[s[i]]]) * prop
+            set.seed(seed)
+            out[[s[i]]] <- sample(out[[s[i]]], size, replace = replace)
+        }
+        ## Closing connection
+        close(con)
+    }
+    return(out)
+}
+```
+
+For this assignment I'll read only 10% of the data and see if it is comparable to the other one I've made with the full data set. I will refrain from using the whole dataset here because rendering the exploratory analysis with the whole dataset took its toe on my computer and 128GB of memory were barely enough.
+
+```{r}
+raw_data <- read.data(lang = "en_US", s = c("blogs", "news", "twitter"), n=0.1, seed = 2791)
+```
+
+Let's take a look at how the data looks like
+
+```{r}
+cat(paste("blogs has", length(raw_data$blogs), "observations"))
+cat(paste("\nnews has", length(raw_data$news), "observations"))
+cat(paste("\ntwitter has", length(raw_data$twitter), "observations"))
+```
+
+```{r}
+cat(paste("first line of blogs:\n", raw_data$blogs[1]))
+cat(paste("\n\nfirst line of news:\n", raw_data$news[1]))
+cat(paste("\n\nfirst line of twitter:\n", raw_data$twitter[1]))
+```
+
+## Data cleaning and pre-processing
+
+First of all, let's transform this list in a df. It might not be the most correct way to work with text data but it is surely the easiest for me. I used a function for it to avoid some unnecessary variables in my workspace.
+
+```{r}
+to_df <- function(lists, lang){
+    ## Creating output data frame.
+    out <- data.frame(ID = character(), 
+                      Text = character(),
+                      stringsAsFactors = FALSE)
+    ## Transforming the data
+    for(name in names(lists)){
+        newdf <- data.frame(ID = paste(name, lang, 1:length(lists[[name]]), sep = "."),
+                            stringsAsFactors = FALSE)
+        newdf["Text"] <- as.character(lists[[name]])
+        ## Merging data from different sources
+        out <- bind_rows(out, newdf)
+    }
+    return(data.frame(out))
+}
+
+df_data <- to_df(raw_data, lang = "en_US")
+rm(raw_data)
+cat(sprintf("df_data is occupying %.2fMBs in memory", object.size(df_data)/1024/1024))
+```
+
+### Profanity
+
+In a different approach than most people would take, I will start with profanity filtering for these two reasons: 
+ - Documents that have a profane word, may have a profane nature/pattern, things that we may want to remove; 
+ - removing profanity after tokenization implicates that we will not remove compound words and (although we are not really creating something a kid would use) we don't want kids to type the word "ball" and have a chance of receiving the recommendation "sack" even though both these words have no problem being used by separately So I've decided to remove the documents that contain any form of profanity in its entirety.
+
+Let's first download a profanity list I found on github.
+
+```{r}
+## Define profanity file path
+file_path <- "data/final/en_US/profanity.txt"
+## Download if not already downloaded
+if(!file.exists(file_path)){
+    url <- "https://raw.githubusercontent.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en"
+    download.file(url, destfile = file_path, method = "curl")
+}
+## Reads profanity file into memory
+profanity_list <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)
+profanity_list <- profanity_list$V1
+```
+
+I've created a function to make this process a little faster with parallelization (the strategy might seem a little strange, but I have tried many approaches and this was the fastest one).
+
+```{r, cache=TRUE, cache.lazy=FALSE}
+filterProfDocs <- function(docs, plist) {
+    nc <- detectCores()-1
+    cl = makePSOCKcluster(nc)
+    registerDoParallel(cl)
+    
+    suppressWarnings(pchunks <- split(plist, 1:nc))
+    
+    filterLists <- foreach(pchunk = pchunks, .combine = "c") %dopar% {
+        pattern = paste("\\b",pchunk,"\\b", sep = "",collapse = "|")
+        list(grepl(pattern, docs, ignore.case = TRUE))
+    }
+    stopCluster(cl)
+    filterLists <- matrix(unlist(filterLists), ncol = nc)
+    filter = rowSums(filterLists) == 0
+    return(filter)
+}
+
+system.time(pfilter <- filterProfDocs(df_data$Text, profanity_list))
+```
+
+Let's have a look at how many documents are leaving our corpus.
+
+```{r}
+cat(sprintf("%i documents are being removed from our copus", sum(!pfilter)))
+cat(sprintf("\n%i documents remaining", sum(pfilter)))
+cat(sprintf("\nthe removed amount corresponds to %.2f%% of the documents", mean(!pfilter)*100))
+```
+
+This is much more proportional to the full data than I expected.
+
+Let's remove these documents and tokenize our data. Once again I made a function to avoid unnecessary variables.
+
+```{r}
+df_data <- filter(df_data, pfilter)
+
+ptokens <- function(docs, dnames, tolower = FALSE, ...){
+    ## tolower
+    if(tolower) docs <- tolower(docs)
+    ## Tokenizing
+    toks <- tokens(docs, ...)
+    names(toks) <- dnames
+    ##Returning output
+    return(toks)
+}
+system.time(f_tokens <- ptokens(docs=df_data$Text, dnames=df_data$ID, tolower=TRUE, 
+                                what = "word", remove_punct = TRUE, 
+                                remove_symbols = TRUE, remove_numbers = TRUE, 
+                                remove_url = TRUE, remove_separators=TRUE,
+                                split_hyphens = TRUE))
+```
+
+There is an important thing about the tokenization. You may have noticed that I am once again adopting a unusual strategy for NLP **I am not removing stopwords**. I opted for not removing stopwords because this is not a pure classification problem, I want to predict what is going to be the next word the person will type and stop words are some of the most used words in any language, these are the words that I want to predict the most as they are going to save more time for the user.
+
+Here is how the tokens turned out.
+
+```{r}
+print(
+  f_tokens[1],
+  max_ntoken = quanteda_options(print_tokens_max_ntoken = 60)
+)
+```
+
+Before proceeding, let's make a clean up.
+
+```{r}
+rm(list = setdiff(ls(), c("df_data", "f_tokens")))
+gc()
+```
+
+## Non English
+
+How many non English words do we have? To find this out, let's download, if not already downloaded, and load a dictionary of English words that I found on github.
+
+```{r}
+## Define English dictionary file path
+file_path <- "data/final/en_US/words_alpha.txt"
+## Download if not already downloaded
+if(!file.exists(file_path)){
+    url <- "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
+    download.file(url, destfile = file_path, method = "curl")
+}
+
+english_dictionary <- read.csv(file_path, header = FALSE, stringsAsFactors = FALSE)$V1
+english_dictionary[1:10]
+```
+
+Now we the o have a look at how the data would look like if it only had the words that are not in the dictionary.How many words would it have?
+
+```{r}
+nenglish_tokens <- tokens_remove(f_tokens, english_dictionary)
+
+cat(sprintf("The full data set has %d words, of which %d are not in the english dictionary \nThis represents %.2f%% of our data", 
+    length(types(f_tokens)), length(types(nenglish_tokens)), length(types(nenglish_tokens))/length(types(f_tokens))*100))
+```
+It is most of the words in the dataset.
+
+I was not going to do this until the exploration phase but, to have a look at the top occurring non English words we are going to use the following function to extract the frequency of a Document Frequency Matrix (DFM). Ps.: I know Quanteda stats have a function to do exactly that, but some really bizarre behavior was not allowing me to work with that function and the mutate/transmute function from dplyr at the same time so I recreated it).
+
+```{r}
+dfm_frequency <- function(dfm, freqType = "both", n = -1, groups = NULL) {
+    output <- list()
+    
+    if(is.null(groups)){
+        groups = rep("nogroups", ndoc(dfm))
+    }
+    
+    for(group in unique(groups)) {
+        if(freqType == "featFreq" | freqType == "both") {
+            featFreq <- data.frame(featfreq(dfm_subset(dfm, groups==group)))
+            colnames(featFreq) <- "featFreq"
+            featFreq <- featFreq %>% 
+                rownames_to_column("feature") %>%
+                arrange(-featFreq) %>%
+                transmute(feature = factor(feature, levels = unique(feature)), 
+                          featFreq = featFreq, 
+                          group = group,
+                          rank = 1:n()) %>%
+                head(n) %>%
+                gather(key = "freqType", value = "frequency", featFreq, factor_key = TRUE)
+        }
+        
+        if(freqType == "docFreq" | freqType == "both") {
+            docFreq <- data.frame(docfreq(dfm_subset(dfm, groups==group)))
+            colnames(docFreq) <- "docFreq"
+            docFreq <- docFreq %>% 
+                rownames_to_column("feature") %>%
+                arrange(-docFreq) %>%
+                transmute(feature = factor(feature, levels = unique(feature)), 
+                          docFreq = docFreq, 
+                          group = group,
+                          rank = 1:n()) %>%
+                head(n) %>%
+                gather(key = "freqType", value = "frequency", docFreq, factor_key = TRUE)
+        }
+        
+        if(freqType == "featFreq") {
+            output <- append(output, list(featFreq))
+        }
+        
+        if(freqType == "docFreq") {
+            output <- append(output, list(docFreq))
+        }
+        
+        if(freqType == "both") {
+            temp <- rbind(featFreq, docFreq)
+            output <- append(output, list(temp))
+        }
+        
+    }
+
+    output <- do.call(rbind, output)
+    
+    return(output)
+}
+```
+
+Now let's convert the nenglish_tokens into a DFM and look at the top 100 non English words.
+
+```{r}
+nenglish_dfmat <- dfm(nenglish_tokens)
+
+nenglish_word_frequency <- dfm_frequency(nenglish_dfmat, n=100)
+
+ggplot(nenglish_word_frequency, mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+I'll remove the most used patterns like *n't* and *'s* to see how many words are actually English words with shortenings.
+
+```{r}
+nenglish_word_frequency <- dfm_frequency(nenglish_dfmat, freqType = "featFreq")
+
+to_remove <- nenglish_word_frequency$feature
+
+common_shorts <- c("'m", "'re", "n't", "'s", "'ve", "'ll", "'d")
+
+for(pat in common_shorts){
+    to_remove <- str_replace(to_remove, pat, "")
+}
+
+length(to_remove[to_remove %in% english_dictionary])
+```
+This many words are actually English.
+
+```{r}
+to_remove <- nenglish_word_frequency$feature[to_remove %in% english_dictionary]
+
+nenglish_dfmat <- dfm_remove(nenglish_dfmat, to_remove)
+
+nenglish_word_frequency <- dfm_frequency(nenglish_dfmat, n=100)
+
+ggplot(nenglish_word_frequency, mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+I should have removed twitter hashtags during the tokenization but I guesss this part will take care of that.
+
+I can see many proper names, acronyms and mainly brand names. The only category that I really wanted to predict are brand names but it would be incredibly hard to separate them here so I'm going to remove them from the tokens too.
+
+```{r}
+f_tokens <- tokens_remove(f_tokens, featnames(nenglish_dfmat))
+```
+
+How many features do we have now?
+
+```{r}
+length(types(f_tokens))
+```
+
+We are left with a much more manageable DFM. Let's have a look the other way around. We have many documents in this corpus, are the English words that are in the dictionary and do not appear in the corpus really worth worrying about? Let's get a sample of them.
+
+```{r}
+set.seed(20220408)
+sample(english_dictionary[!english_dictionary %in% types(f_tokens)], 20)
+```
+
+Very few of these words are barely used and the rest of them are literally **NEVER** used. If we had too many words missing, we could identify synonyms for them, duplicate the sentences that have these synonyms and replace the words in these duplicated sentences. But in this case, it is completely unnecessary.
+
+Clean up
+
+```{r}
+rm(list = setdiff(ls(), c("df_data", "f_tokens", "dfm_frequency")))
+gc()
+```
+
+## Exploring the data
+
+To start here the exploration here, let's first create a dfm. This will help us in the next steps
+
+```{r}
+dfmat <- dfm(f_tokens)
+```
+
+### Doc Sizes
+
+What is the distribution of the sizes of documents? I will be gathering some data for quick reference summary table while we look at the distributions
+
+```{r}
+df_data$size <- nchar(df_data$Text)
+
+ggplot(df_data, mapping = aes(x = size)) +
+    geom_histogram(bins = 60)
+```
+
+There is at least one very big document which is preventing us to see the distribution clearly (an outlier). I'll try to find a max range that is acceptable
+
+```{r}
+ggplot(df_data[df_data$size<1000,], mapping = aes(x = size)) +
+    geom_histogram(bins = 60)
+```
+
+Not surprisingly, most of the docs is less than 140 char long, as many of the documents are from twitter. let's divide it by group.
+
+```{r}
+df_data$group <- vapply(strsplit(docnames(dfmat),"\\."), `[`, 1, FUN.VALUE=character(1))
+
+ggplot(df_data[df_data$size<1000,], mapping = aes(x = size)) +
+    geom_histogram(bins = 60) +
+    facet_grid(cols = vars(group), scales = "free")
+```
+
+The distribution in blogs is obviously logarithmic, in news we have an almost normal distribution and in the twitter it is almost uniform due to the low limitation of characters. 
+
+Let's have a look at the biggest and smallest documents. I won't print the biggest document because my computer doesn't like rendering it with the amount of memory I have. But here is it's name in case you are wondering.
+
+```{r}
+df_data$ID[df_data$size == max(df_data$size)]
+```
+
+What is the source of it?
+
+```{r}
+df_data$group[df_data$size == max(df_data$size)]
+```
+
+How long is it?
+
+```{r}
+df_data$size[df_data$size == max(df_data$size)]
+```
+
+What about the smallest one?
+
+```{r}
+df_data$Text[df_data$size == min(df_data$size)]
+```
+
+With all the removals we've made, we might have ended up creating many empty documents, but the document is still there. Besides that, I decided to remove all the one char words. The keyboard already has a key for that, I don't need to predict it.
+
+```{r}
+f_tokens <- tokens_remove(f_tokens, featnames(dfmat)[nchar(featnames(dfmat)) == 1])
+
+df_data <- df_data[ntoken(f_tokens) > 0,]
+f_tokens <- f_tokens[ntoken(f_tokens) > 0,]
+
+print(df_data$Text[df_data$size == min(df_data$size)])
+```
+
+Do I want to predict for docs with only one token? I don't think so. Mainly considering the one word documents we have. I'll only accept documents with at least 2 tokens
+
+```{r}
+df_data <- df_data[ntoken(f_tokens) > 1,]
+f_tokens <- f_tokens[ntoken(f_tokens) > 1,]
+
+print(df_data$Text[df_data$size == min(df_data$size)][1:25])
+```
+
+Gathering some summary data about the number of characters.
+
+```{r}
+df_data$size <- NULL
+df_data$nchars <- nchar(df_data$Text)
+
+summary <- bind_rows(
+    df_data %>%
+        group_by(group) %>%
+        summarise(mean_nchar = mean(nchars), min_nchars = quantile(nchars)[1],
+                  Q1_nchars = quantile(nchars)[2], median_nchars = quantile(nchars)[3],
+                  Q3_nchars = quantile(nchars)[4], max_nchars = quantile(nchars)[5]),
+    df_data %>%
+        summarise(group = "total", mean_nchar = mean(nchars), min_nchars = quantile(nchars)[1],
+                  Q1_nchars = quantile(nchars)[2], median_nchars = quantile(nchars)[3],
+                  Q3_nchars = quantile(nchars)[4], max_nchars = quantile(nchars)[5])
+)
+
+print(summary)
+```
+
+Let's also have a look at the number of tokens per document, as it is proportional to the number of characters, we won't be looking at the distributions again as the plots are going to look the same.
+
+```{r}
+df_data$ntokens <- ntoken(f_tokens)
+
+summary <- bind_rows(
+    df_data %>%
+        group_by(group) %>%
+        summarise(mean_ntokens = mean(ntokens), min_ntokens = quantile(ntokens)[1], 
+                  Q1_ntokens = quantile(ntokens)[2], median_ntokens = quantile(ntokens)[3], 
+                  Q3_ntokens = quantile(ntokens)[4], max_ntokens = quantile(ntokens)[5]),
+    df_data %>%
+        summarise(group = "total", mean_ntokens = mean(ntokens), min_ntokens = quantile(ntokens)[1], 
+                  Q1_ntokens = quantile(ntokens)[2], median_ntokens = quantile(ntokens)[3], 
+                  Q3_ntokens = quantile(ntokens)[4], max_ntokens = quantile(ntokens)[5])
+)
+
+print(summary)
+```
+
+### Word frequency
+
+#### Unigrams
+
+How many words to we have in the dataset?
+
+```{r}
+dfmat <- dfm(f_tokens)
+nfeat(dfmat)
+```
+
+What are the top 100 and what is their frequency?
+
+```{r}
+word_frequency <- dfm_frequency(dfmat, n=100)
+
+ggplot(word_frequency, mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+This is interesting and at the same time expected, the distribution is exponential. However, when you consider the frequency that a word appears in a document (not total frequency, but only count once per document the word appears), some words lose several positions in rank, as an example we have the word *was*, it may appear several times in documents that are in the past tense, but will not appear at all if the document is written in the the present or future tense.
+
+Does this change between source types? I'll show only the top 25 this time for space sake as the behavior seems to be asymptotic (I know this is revolting, but I really wanted to put the charts in decreasing order without having to load *griExtra*).
+
+```{r}
+groups <- vapply(strsplit(docnames(dfmat),"\\."), `[`, 1, FUN.VALUE=character(1))
+
+word_frequency <- dfm_frequency(dfmat, n=25, groups = groups) %>%
+    mutate(lvl = factor(paste(feature, group, sep = "."), levels = unique(paste(feature, group, sep = "."))))
+
+ggplot(word_frequency, mapping = aes(x = lvl, y = frequency, color = freqType)) +
+    geom_text(aes(y=-1,label=feature),angle=90,size=3,hjust=1, vjust = 0.25, colour = "black") +
+    theme(axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.line.x = element_blank(),
+          axis.ticks.x = element_blank()) +
+    geom_point(alpha = 0.4) +
+    facet_grid(cols = vars(group), scales = "free_x")
+```
+
+The differences in the distribution are small. Let's answer a question from the task description: How many unique words do you need in a frequency sorted dictionary to cover 50% of all word instances in the language? 90%?
+
+```{r}
+word_frequency <- dfm_frequency(dfmat, freqType = "featFreq") %>%
+    mutate(percent = frequency/sum(frequency), cumPercent = cumsum(percent))
+
+cat(sprintf("50%% of the data can be reached with %i words\n90%% of the data can be reached with %i words", 
+            min(which(word_frequency$cumPercent > 0.5)),
+            min(which(word_frequency$cumPercent > 0.9))))
+
+```
+
+The number of words at the 0.5 percentile didn't change at all but the 90% changed a lot.
+
+The number of words that can cover most of the data is surprisingly small. what is the frequency of the last word to be part of the 0.5 percentile?
+
+```{r}
+word_frequency[min(which(word_frequency$cumPercent > 0.5)),]
+```
+
+Even though this is still a very high frequency, it represents only 0.1% of the words in the dataset, what about the 0.9 percentile?
+
+```{r}
+word_frequency[min(which(word_frequency$cumPercent > 0.9)),]
+```
+
+This is a big difference, we are talking about only 0.001% of the words in the dataset. I'm starting to see that that are lots of non actual words in our data, but then again, if people write it, mainly if they write it so often, I want to predict it.
+
+#### Bigrams
+
+How many 2-grams do we have in the data.
+
+```{r}
+dfmat2 <- dfm(tokens_ngrams(f_tokens, n=2))
+
+nfeat(dfmat2)
+```
+
+This is much more than the number of tokens. Not surprisingly though, how much of an increase is that exactly?
+
+```{r}
+cat(sprintf("The set of 2-grams represent %.2f%% of the the 1-grams set", nfeat(dfmat2)/nfeat(dfmat)*100))
+```
+
+Wow! let's see the top 100.
+
+```{r}
+word_freq <- dfm_frequency(dfmat2)
+ggplot(word_freq[word_freq$rank < 101,], mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+Let's move on to the trigrams.
+
+#### Trigrams
+
+How many trigrams.
+
+```{r}
+dfmat2 <- dfm(tokens_ngrams(f_tokens, n=3))
+
+nfeat(dfmat2)
+```
+
+Percentage of the unigrams.
+
+```{r}
+cat(sprintf("The set of 3-grams represent %.2f%% of the the 1-grams set", nfeat(dfmat2)/nfeat(dfmat)*100))
+```
+
+Top 100 again.
+
+```{r}
+word_freq <- dfm_frequency(dfmat2)
+ggplot(word_freq[word_freq$rank < 101,], mapping = aes(x = feature, y = frequency, color = freqType)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.25)) +
+    geom_point(alpha = 0.4)
+```
+
+I could be here forever but the amount of knowledge I will generate is asymptotic, and this document is already a little longer the it should be. I hope my peers don't mind it.
+
+## Conclusion
+
+From this whole document, I've been able to see that the data behaves mostly the same when using only a subset of the documents compared to using all the documents, but the total number of words is incredibly smaller. We only lost low frequency words which I don't mind.
+
+For the modeling, at first, I will not be using any formal machine leaning model, but creating my own frequentist statistic model to determine the most likely next word. considering the probability of a word, the probability of a word given previous word and the probability of a word given the two previous words.
+
+I'd love to train some LSTM model as well, and I might still do it given the memory and speed requirements for the model. But first I'll start with an n-gram statistical model as stated above. To comply 

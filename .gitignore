@@ -5,3 +5,6 @@
 DS_CapstoneProject.Rproj
 data/*
 checkpoints/*
+*_cache
+*_files
+rsconnect
