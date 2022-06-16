@@ -110,7 +110,7 @@ system.time(ngkmodel <- ngkm_train(train_tokens, ngrams = 5, lambda = 0.4, k = 0
 Let's save this
 
 ```{r}
-save(ngkmodel, file = "ngkm/ngkm.RData")
+save(ngkmodel, file = "models/ngkm.RData")
 ```
 
 ### Grid search
@@ -264,7 +264,7 @@ ngkm_evaluate <- function(prefix, answer, model, cores) {
     opts <- list(progress = progress)
     
     result <- foreach(i = 1:length(prefix), .combine = rbind, .options.snow = opts) %dopar% {
-        source("ngkm/ngkm_functions.R")                  
+        source("models/ngkm_functions.R")                  
         
         time <- system.time(pred <- ngkm_predict(prefix[[i]], model))[[3]]
         result <-  list(time)
@@ -285,7 +285,7 @@ ngkm_evaluate <- function(prefix, answer, model, cores) {
 }
 ```
 
-Now that we have everything, let's just finish our grid searc data colection.
+Now that we have everything, let's just finish our grid search data collection.
 
 ```{r}
 acc <- data.table(matrix(ncol = ngkmodel$npred+3, nrow = 0))
@@ -329,17 +329,19 @@ ggplot(acc2, mapping = aes(x = factor(k), y = accuracy, fill = factor(lambda))) 
 
 It is very obvious that adding more and more predictions will increase the accuracy, but at some point it will become very clunky to do so, The k does contribute negatively to the prediction accuracy however, it seems like it does contribute positively (negatively, but this one is the lower the better) the prediction time. The lambda does seem to have an optimum point at 0.75.
 
-Other than the lambda, any other decision I make is quite arbitrary. Anyways, I'll go for the k of 2 for the size gain and the low accuracy loss compared to the k of 1. I'll also choose a npred of 6. I do think that predicting 6 outcomes is a bit much, but the gain over 5 is big, so this is what I'm going for.
+Other than the lambda, any other decision I make is quite arbitrary. Anyways, I'll go for the k of 3 for the size gain and the low accuracy loss compared to the k of 1. I'll also choose a npred of 6. I do think that predicting 6 outcomes is a bit much, but the gain over 5 is big, so this is what I'm going for.
 
 What accuracy I can expect for this model?
 
 ```{r}
-acc[k==2 & lambda==0.25]
+save(results, file = "checkpoints/t5_results.RData")
+save(acc, file="checkpoints/t5_acc.RData")
+acc[k==3 & lambda==0.25]
 ```
 
 For such a model, I should expect an accuracy of 35% which is incredible, compared to the models I've seen from other students.
 
-Let's make a quick clean up before training the model again.
+Let's make a quick clean up before training the moSdel again.
 
 ```{r}
 rm(list = setdiff(ls(), c("clean_df", "clean_toks", "%!in%", "ngkm_evaluate", "ngkm_predict", "ngkm_prep", "ngkm_replace", "ngkm_train")))
@@ -350,8 +352,8 @@ gc()
 Now for the training. I'll use the whole dataset this time.
 
 ```{r}
-system.time(ngkmodel <- ngkm_train(clean_toks, ngrams = 5, lambda = 0.25, k = 2, npred = 6))
-save(ngkmodel, file = "ngkm/ngkm.RData")
+system.time(ngkmodel <- ngkm_train(clean_toks, ngrams = 5, lambda = 0.25, k = 3, npred = 6))
+save(ngkmodel, file = "models/ngkm.RData")
 ```
 
 Let's see how it goes in the tests.
